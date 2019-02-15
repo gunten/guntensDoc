@@ -1636,7 +1636,7 @@ public class PfTest {
 
 
 
-## 5 布隆过滤器 BloomFilter
+## 5 布隆过滤器 BloomFilter//原理
 
 上一节我们学会了使用 HyperLogLog 数据结构来进行估数，它非常有价值，可以解决很多精确度不高的统计需求。
 
