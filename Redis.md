@@ -561,6 +561,16 @@ zset 内部的排序功能是通过「跳跃列表」数据结构来实现的，
 
 关于跳跃列表的内部结构实现，请阅读第 36 节[《极度深寒 —— 探索「跳跃列表」内部结构》](https://juejin.im/book/5afc2e5f6fb9a07a9b362527/section/5b5ac63d5188256255299d9c)
 
+
+
+### 新结构Stream
+
+[]: #1-Stream
+
+
+
+
+
 ### 容器型数据结构的通用规则
 
 list/set/hash/zset 这四种数据结构是容器型数据结构，它们共享下面两条通用规则：
@@ -772,7 +782,7 @@ public class RedisWithReentrantLock {
 
 跟 Python 版本区别不大，也是基于 ThreadLocal 和引用计数。
 
-以上还不是分布式锁的全部，在小册的拓展篇[《拾遗漏补 —— 再谈分布式锁》](https://juejin.im/book/5afc2e5f6fb9a07a9b362527/section/5b4c19216fb9a04fb8773ed1)，我们还会继续对分布式锁做进一步的深入理解。
+以上还不是分布式锁的全部，在小册的拓展篇 [RedLock](#3-再谈分布式锁-RedLock)
 
 ==没有终极解决，超时问题还存在==
 
@@ -4007,7 +4017,7 @@ wait 提供两个参数，第一个参数是从库的数量 N，第二个参数�
 
 ## 集群篇
 
-## 1 Sentinel //集群搭建、切换   java操作
+## 1 Sentinel //集群主动切换 、springboot sentinel配置
 
 目前我们讲的 Redis 还只是主从方案，最终一致性。读者们可思考过，如果主节点凌晨 3 点突发宕机怎么办？就坐等运维从床上爬起来，然后手工进行从主切换，再通知所有的程序把地址统统改一遍重新上线么？毫无疑问，这样的人工运维效率太低，事故发生时估计得至少 1 个小时才能缓过来。如果是一个大型公司，这样的事故足以上新闻了。
 
@@ -4073,7 +4083,7 @@ min-slaves-max-lag 10
 
 sentinel 的默认端口是 26379，不同于 Redis 的默认端口 6379，通过 sentinel 对象的 discover_xxx 方法可以发现主从地址，主地址只有一个，从地址可以有多个。
 
-```
+```python
 >>> master = sentinel.master_for('mymaster', socket_timeout=0.1)
 >>> slave = sentinel.slave_for('mymaster', socket_timeout=0.1)
 >>> master.set('foo', 'bar')
@@ -4093,3 +4103,909 @@ sentinel 的默认端口是 26379，不同于 Redis 的默认端口 6379，通�
 
 主从切换后，之前的主库被降级到从库，所有的修改性的指令都会抛出`ReadonlyError`。如果没有修改性指令，虽然连接不会得到切换，但是数据不会被破坏，所以即使不切换也没关系。
 
+### 补充
+
+单机下搭了个一主两从，3个sentinel的集群玩了一下，有点意思。发现sentinel是通过修改redis-server的配置文件的slaveof /replicaof(5.0)属性来进行动态的主节点记录的，要记得给当前用户开修改文件的权限
+
+
+
+## 2 Codis //实践
+
+在大数据高并发场景下，单个 Redis 实例往往会显得捉襟见肘。首先体现在内存上，单个 Redis 的内存不宜过大，内存太大会导致 rdb 文件过大，进一步导致主从同步时全量同步时间过长，在实例重启恢复时也会消耗很长的数据加载时间，特别是在云环境下，单个实例内存往往都是受限的。其次体现在 CPU 的利用率上，单个 Redis 实例只能利用单个核心，这单个核心要完成海量数据的存取和管理工作压力会非常大。
+
+正是在这样的大数据高并发的需求之下，Redis 集群方案应运而生。它可以将众多小内存的 Redis 实例综合起来，将分布在多台机器上的众多 CPU 核心的计算能力聚集到一起，完成海量数据存储和高并发读写操作。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/5/30/163af9facdbecdbc?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+[Codis](https://link.juejin.im/?target=https%3A%2F%2Fgithub.com%2FCodisLabs%2Fcodis) 是 Redis 集群方案之一，令我们感到骄傲的是，它是中国人开发并开源的，来自前豌豆荚中间件团队。绝大多数国内的开源项目都不怎么靠谱，但是 Codis 非常靠谱。有了 Codis 技术积累之后，项目「突头人」刘奇又开发出来中国人自己的开源分布式数据库 —— [TiDB](https://link.juejin.im/?target=https%3A%2F%2Fgithub.com%2Fpingcap%2Ftidb)，可以说 6 到飞起。👍
+
+从 Redis 的广泛流行到 RedisCluster 的广泛使用之间相隔了好多年，Codis 就是在这样的市场空缺的机遇下发展出来的。大型公司有明确的 Redis 在线扩容需求，但是市面上没有特别好的中间件可以做到这一点。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/4/16464134248c9f73?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+Codis 使用 Go 语言开发，它是一个代理中间件，它和 Redis 一样也使用 Redis 协议对外提供服务，当客户端向 Codis 发送指令时，Codis 负责将指令转发到后面的 Redis 实例来执行，并将返回结果再转回给客户端。
+
+Codis 上挂接的所有 Redis 实例构成一个 Redis 集群，当集群空间不足时，可以通过动态增加 Redis 实例来实现扩容需求。
+
+客户端操纵 Codis 同操纵 Redis 几乎没有区别，还是可以使用相同的客户端 SDK，不需要任何变化。
+
+因为 Codis 是无状态的，它只是一个转发代理中间件，这意味着我们可以启动多个 Codis 实例，供客户端使用，每个 Codis 节点都是对等的。因为单个 Codis 代理能支撑的 QPS 比较有限，通过启动多个 Codis 代理可以显著增加整体的 QPS 需求，还能起到容灾功能，挂掉一个 Codis 代理没关系，还有很多 Codis 代理可以继续服务。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/4/1646414ff83e5846?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+### Codis 分片原理
+
+Codis 要负责将特定的 key 转发到特定的 Redis 实例，那么这种对应关系 Codis 是如何管理的呢？
+
+Codis 将所有的 key 默认划分为 1024 个槽位(slot)，它首先对客户端传过来的 key 进行 crc32 运算计算哈希值，再将 hash 后的整数值对 1024 这个整数进行取模得到一个余数，这个余数就是对应 key 的槽位。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/5/30/163b010123791e6a?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+每个槽位都会唯一映射到后面的多个 Redis 实例之一，Codis 会在内存维护槽位和 Redis 实例的映射关系。这样有了上面 key 对应的槽位，那么它应该转发到哪个 Redis 实例就很明确了。
+
+```
+hash = crc32(command.key)
+slot_index = hash % 1024
+redis = slots[slot_index].redis
+redis.do(command)
+```
+
+槽位数量默认是1024，它是可以配置的，如果集群节点比较多，建议将这个数值配置大一些，比如2048、4096。
+
+### 不同的 Codis 实例之间槽位关系如何同步？
+
+如果 Codis 的槽位映射关系只存储在内存里，那么不同的 Codis 实例之间的槽位关系就无法得到同步。所以 Codis 还需要一个分布式配置存储数据库专门用来持久化槽位关系。Codis 开始使用 ZooKeeper，后来连 etcd 也一块支持了。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/4/16464178c9cc01fd?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+Codis 将槽位关系存储在 zk 中，并且提供了一个 Dashboard 可以用来观察和修改槽位关系，当槽位关系变化时，Codis Proxy 会监听到变化并重新同步槽位关系，从而实现多个 Codis Proxy 之间共享相同的槽位关系配置。
+
+### 扩容
+
+刚开始 Codis 后端只有一个 Redis 实例，1024 个槽位全部指向同一个 Redis。然后一个 Redis 实例内存不够了，所以又加了一个 Redis 实例。这时候需要对槽位关系进行调整，将一半的槽位划分到新的节点。这意味着需要对这一半的槽位对应的所有 key 进行迁移，迁移到新的 Redis 实例。
+
+**那 Codis 如何找到槽位对应的所有 key 呢？**
+
+Codis 对 Redis 进行了改造，增加了 SLOTSSCAN 指令，可以遍历指定 slot 下所有的 key。Codis 通过 SLOTSSCAN 扫描出待迁移槽位的所有的 key，然后挨个迁移每个 key 到新的 Redis 节点。
+
+在迁移过程中，Codis 还是会接收到新的请求打在当前正在迁移的槽位上，因为当前槽位的数据同时存在于新旧两个槽位中，Codis 如何判断该将请求转发到后面的哪个具体实例呢？
+
+Codis 无法判定迁移过程中的 key 究竟在哪个实例中，所以它采用了另一种完全不同的思路。当 Codis 接收到位于正在迁移槽位中的 key 后，会立即强制对当前的单个 key 进行迁移，迁移完成后，再将请求转发到新的 Redis 实例。
+
+```
+slot_index = crc32(command.key) % 1024
+if slot_index in migrating_slots:
+	do_migrate_key(command.key)  # 强制执行迁移
+	redis = slots[slot_index].new_redis
+else:
+	redis = slots[slot_index].redis
+redis.do(command)
+```
+
+我们知道 Redis 支持的所有 Scan 指令都是无法避免重复的，同样 Codis 自定义的 SLOTSSCAN 也是一样，但是这并不会影响迁移。因为单个 key 被迁移一次后，在旧实例中它就彻底被删除了，也就不可能会再次被扫描出来了。
+
+### 自动均衡
+
+Redis 新增实例，手工均衡slots太繁琐，所以 Codis 提供了自动均衡功能。自动均衡会在系统比较空闲的时候观察每个 Redis 实例对应的 Slots 数量，如果不平衡，就会自动进行迁移。
+
+### Codis 的代价
+
+Codis 给 Redis 带来了扩容的同时，也损失了其它一些特性。因为 Codis 中所有的 key 分散在不同的 Redis 实例中，所以事务就不能再支持了，事务只能在单个 Redis 实例中完成。同样 rename 操作也很危险，它的参数是两个 key，如果这两个 key 在不同的 Redis 实例中，rename 操作是无法正确完成的。Codis 的官方文档中给出了一系列不支持的命令列表。
+
+同样为了支持扩容，单个 key 对应的 value 不宜过大，因为集群的迁移的最小单位是 key，对于一个 hash 结构，它会一次性使用 hgetall 拉取所有的内容，然后使用 hmset 放置到另一个节点。如果 hash 内部的 kv 太多，可能会带来迁移卡顿。官方建议单个集合结构的总字节容量不要超过 1M。如果我们要放置社交关系数据，例如粉丝列表这种，就需要注意了，可以考虑分桶存储，在业务上作折中。
+
+Codis 因为增加了 Proxy 作为中转层，所有在网络开销上要比单个 Redis 大，毕竟数据包多走了一个网络节点，整体在性能上要比单个 Redis 的性能有所下降。但是这部分性能损耗不是太明显，可以通过增加 Proxy 的数量来弥补性能上的不足。
+
+Codis 的集群配置中心使用 zk 来实现，意味着在部署上增加了 zk 运维的代价，不过大部分互联网企业内部都有 zk 集群，可以使用现有的 zk 集群使用即可。
+
+### Codis 的优点
+
+Codis 在设计上相比 Redis Cluster 官方集群方案要简单很多，因为它将分布式的问题交给了第三方 zk/etcd 去负责，自己就省去了复杂的分布式一致性代码的编写维护工作。而 Redis Cluster 的内部实现非常复杂，它为了实现去中心化，混合使用了复杂的 Raft 和 Gossip 协议，还有大量的需要调优的配置参数，当集群出现故障时，维护人员往往不知道从何处着手。
+
+### MGET 指令的操作过程
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/10/16481f2b7825a89f?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+mget 指令用于批量获取多个 key 的值，这些 key 可能会分布在多个 Redis 实例中。Codis 的策略是将 key 按照所分配的实例打散分组，然后依次对每个实例调用 mget 方法，最后将结果汇总为一个，再返回给客户端。
+
+
+
+### 架构变迁
+
+Codis 作为非官方 Redis 集群方案，近几年来它的结构一直在不断变化，一方面当官方的 Redis 有变化的时候它要实时去跟进，另一方面它作为 Redis Cluster 的竞争方案之一，它还得持续提高自己的竞争力，给自己增加更多的官方集群所没有的便捷功能。
+
+比如 Codis 有个特色的地方在于强大的 Dashboard 功能，能够便捷地对 Redis 集群进行管理。这是 Redis 官方所欠缺的。另外 Codis 还开发了一个 Codis-fe(federation 联邦) 工具，可以同时对多个 Codis 集群进行管理。在大型企业，Codis 集群往往会有几十个，有这样一个便捷的联邦工具可以降低不少运维成本。
+
+### Codis 的尴尬
+
+Codis 不是 Redis 官方项目，这意味着它的命运会无比曲折，它总是要被官方 Redis 牵着牛鼻子走。当 Redis 官方提供了什么功能它欠缺时，Codis 就会感到恐惧，害怕自己被市场甩掉，所以必须实时保持跟进。
+
+同时因为 Codis 总是要比 Redis 官方慢一拍，Redis 官方提供的最新功能，Codis 往往要等很久才能同步。比如现在 Redis 已经进入到 4.0 阶段，提供了插件化 Redis-Module 支持，目前 Codis 还没有提供解决方案。
+
+现在 Redis-Cluster 在业界已经逐渐流行起来，Codis 能否持续保持竞争力是个问题，我们看到 Codis 在不断的差异化竞争，竞争的方法就体现在工具上，而不是内核，这个和官方的路线真是相反的，官方对工具无暇顾及，只提供基本的工具，其它完全交给第三方去开发。
+
+### Codis 的后台管理
+
+后台管理的界面非常友好，使用了最新的 BootStrap 前端框架。比较酷炫的是可以看到实时的 QPS 波动曲线。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/5/30/163af25a3336bf5e?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+同时还支持服务器集群管理功能，可以增加分组、增加节点、执行自动均衡等指令，还可以直接查看所有 slot 的状态，每个 slot 被分配到哪个 Redis 实例。
+
+### 思考 & 作业
+
+1. 请读者自己尝试搭建一个 Codis 集群。
+2. 使用 Python 或者 Java 客户端体验一下 Codis 集群的常规 Redis 指令
+
+
+
+## 3 Cluster //实践
+
+RedisCluster 是 Redis 的亲儿子，它是 Redis 作者自己提供的 Redis 集群化方案。
+
+
+
+相对于 Codis 的不同，它是去中心化的，如图所示，该集群有三个 Redis 节点组成，每个节点负责整个集群的一部分数据，每个节点负责的数据多少可能不一样。这三个节点相互连接组成一个对等的集群，它们之间通过一种特殊的二进制协议相互交互集群信息。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/10/16481f3bd5ca1577?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+Redis Cluster 将所有数据划分为 16384 的 slots，它比 Codis 的 1024 个槽划分的更为精细，每个节点负责其中一部分槽位。槽位的信息存储于每个节点中，它不像 Codis，它不需要另外的分布式存储来存储节点槽位信息。
+
+当 Redis Cluster 的客户端来连接集群时，它也会得到一份集群的槽位配置信息。这样当客户端要查找某个 key 时，可以直接定位到目标节点。
+
+这点不同于 Codis，Codis 需要通过 Proxy 来定位目标节点，RedisCluster 是直接定位。客户端为了可以直接定位某个具体的 key 所在的节点，它就需要缓存槽位相关信息，这样才可以准确快速地定位到相应的节点。同时因为槽位的信息可能会存在客户端与服务器不一致的情况，还需要纠正机制来实现槽位信息的校验调整。
+
+另外，RedisCluster 的每个节点会将集群的配置信息持久化到配置文件中，所以必须确保配置文件是可写的，而且尽量不要依靠人工修改配置文件。
+
+### 槽位定位算法
+
+Cluster 默认会对 key 值使用 crc16 算法进行 hash 得到一个整数值，然后用这个整数值对 16384 进行取模来得到具体槽位。
+
+Cluster 还允许用户强制某个 key 挂在特定槽位上，通过在 key 字符串里面嵌入 tag 标记，这就可以强制 key 所挂在的槽位等于 tag 所在的槽位。
+
+```
+def HASH_SLOT(key)
+    s = key.index "{"
+    if s
+        e = key.index "}",s+1
+        if e && e != s+1
+            key = key[s+1..e-1]
+        end
+    end
+    crc16(key) % 16384
+end
+```
+
+#### 跳转
+
+当客户端向一个错误的节点发出了指令，该节点会发现指令的 key 所在的槽位并不归自己管理，这时它会向客户端发送一个特殊的跳转指令携带目标操作的节点地址，告诉客户端去连这个节点去获取数据。
+
+```
+GET x
+-MOVED 3999 127.0.0.1:6381
+```
+
+MOVED 指令的第一个参数 3999 是 key 对应的槽位编号，后面是目标节点地址。MOVED 指令前面有一个减号，表示该指令是一个错误消息。
+
+客户端收到 MOVED 指令后，要立即纠正本地的槽位映射表。后续所有 key 将使用新的槽位映射表。
+
+### 迁移
+
+Redis Cluster 提供了工具 redis-trib 可以让运维人员手动调整槽位的分配情况，它使用 Ruby 语言进行开发，通过组合各种原生的 Redis Cluster 指令来实现。这点 Codis 做的更加人性化，它不但提供了 UI 界面可以让我们方便的迁移，还提供了自动化平衡槽位工具，无需人工干预就可以均衡集群负载。不过 Redis 官方向来的策略就是提供最小可用的工具，其它都交由社区完成。
+
+**迁移过程**
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/31/164f0ac2cd2a1c9f?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+Redis 迁移的单位是槽，Redis 一个槽一个槽进行迁移，当一个槽正在迁移时，这个槽就处于中间过渡状态。这个槽在原节点的状态为`migrating`，在目标节点的状态为`importing`，表示数据正在从源流向目标。
+
+迁移工具 redis-trib 首先会在源和目标节点设置好中间过渡状态，然后一次性获取源节点槽位的所有 key 列表(keysinslot指令，可以部分获取)，再挨个key进行迁移。每个 key 的迁移过程是以原节点作为目标节点的「客户端」，原节点对当前的key执行dump指令得到序列化内容，然后通过「客户端」向目标节点发送指令restore携带序列化的内容作为参数，目标节点再进行反序列化就可以将内容恢复到目标节点的内存中，然后返回「客户端」OK，原节点「客户端」收到后再把当前节点的key删除掉就完成了单个key迁移的整个过程。
+
+**从源节点获取内容 => 存到目标节点 => 从源节点删除内容**。
+
+注意这里的迁移过程是同步的，在目标节点执行restore指令到原节点删除key之间，原节点的主线程会处于阻塞状态，直到key被成功删除。
+
+如果迁移过程中突然出现网络故障，整个slot的迁移只进行了一半。这时两个节点依旧处于中间过渡状态。待下次迁移工具重新连上时，会提示用户继续进行迁移。
+
+在迁移过程中，如果每个key的内容都很小，migrate指令执行会很快，它就并不会影响客户端的正常访问。如果key的内容很大，因为migrate指令是阻塞指令会同时导致原节点和目标节点卡顿，影响集群的稳定型。所以在集群环境下业务逻辑要尽可能避免大key的产生。
+
+在迁移过程中，客户端访问的流程会有很大的变化。
+
+首先新旧两个节点对应的槽位都存在部分 key 数据。客户端先尝试访问旧节点，如果对应的数据还在旧节点里面，那么旧节点正常处理。如果对应的数据不在旧节点里面，那么有两种可能，要么该数据在新节点里，要么根本就不存在。旧节点不知道是哪种情况，所以它会向客户端返回一个`-ASK targetNodeAddr`的重定向指令。客户端收到这个重定向指令后，先去目标节点执行一个不带任何参数的`asking`指令，然后在目标节点再重新执行原先的操作指令。
+
+为什么需要执行一个不带参数的`asking`指令呢？
+
+因为在迁移没有完成之前，按理说这个槽位还是不归新节点管理的，如果这个时候向目标节点发送该槽位的指令，节点是不认的，它会向客户端返回一个`-MOVED`重定向指令告诉它去源节点去执行。如此就会形成 **重定向循环**。`asking`指令的目标就是打开目标节点的选项，告诉它下一条指令不能不理，而要当成自己的槽位来处理。
+
+从以上过程可以看出，迁移是会影响服务效率的，同样的指令在正常情况下一个 ttl 就能完成，而在迁移中得 3 个 ttl 才能搞定。
+
+### 容错
+
+Redis Cluster 可以为每个主节点设置若干个从节点，单主节点故障时，集群会自动将其中某个从节点提升为主节点。如果某个主节点没有从节点，那么当它发生故障时，集群将完全处于不可用状态。不过 Redis 也提供了一个参数`cluster-require-full-coverage`可以允许部分节点故障，其它节点还可以继续提供对外访问。
+
+### 网络抖动
+
+真实世界的机房网络往往并不是风平浪静的，它们经常会发生各种各样的小问题。比如网络抖动就是非常常见的一种现象，突然之间部分连接变得不可访问，然后很快又恢复正常。
+
+为解决这种问题，Redis Cluster 提供了一种选项`cluster-node-timeout`，表示当某个节点持续 timeout 的时间失联时，才可以认定该节点出现故障，需要进行主从切换。如果没有这个选项，网络抖动会导致主从频繁切换 (数据的重新复制)。
+
+还有另外一个选项`cluster-slave-validity-factor`作为倍乘系数来放大这个超时时间来宽松容错的紧急程度。如果这个系数为零，那么主从切换是不会抗拒网络抖动的。如果这个系数大于 1，它就成了主从切换的松弛系数。
+
+### 可能下线 (PFAIL-Possibly Fail) 与确定下线 (Fail)
+
+因为 Redis Cluster 是去中心化的，一个节点认为某个节点失联了并不代表所有的节点都认为它失联了。所以集群还得经过一次协商的过程，只有当大多数节点都认定了某个节点失联了，集群才认为该节点需要进行主从切换来容错。
+
+Redis 集群节点采用 Gossip 协议来广播自己的状态以及自己对整个集群认知的改变。比如一个节点发现某个节点失联了 (PFail)，它会将这条信息向整个集群广播，其它节点也就可以收到这点失联信息。如果一个节点收到了某个节点失联的数量 (PFail Count) 已经达到了集群的大多数，就可以标记该节点为确定下线状态 (Fail)，然后向整个集群广播，强迫其它节点也接收该节点已经下线的事实，并立即对该失联节点进行主从切换。
+
+### Cluster 基本使用
+
+redis-py 客户端不支持 Cluster 模式，要使用 Cluster，必须安装另外一个包，这个包是依赖 redis-py 包的。
+
+```
+pip install redis-py-cluster
+```
+
+下面我们看看 redis-py-cluster 如何使用。
+
+```
+>>> from rediscluster import StrictRedisCluster
+>>> # Requires at least one node for cluster discovery. Multiple nodes is recommended.
+>>> startup_nodes = [{"host": "127.0.0.1", "port": "7000"}]
+>>> rc = StrictRedisCluster(startup_nodes=startup_nodes, decode_responses=True)
+>>> rc.set("foo", "bar")
+True
+>>> print(rc.get("foo"))
+'bar'
+```
+
+Cluster 是去中心化的，它有多个节点组成，构造 StrictRedisCluster 实例时，我们可以只用一个节点地址，其它地址可以自动通过这个节点来发现。不过如果提供多个节点地址，安全性会更好。如果只提供一个节点地址，那么当这个节点挂了，客户端就必须更换地址才可以继续访问 Cluster。 第二个参数 `decode_responses` 表示是否要将返回结果中的 byte 数组转换成 unicode。
+
+Cluster 使用起来非常方便，用起来和普通的 redis-py 差别不大，仅仅是构造方式不同。但是它们也有相当大的不一样之处，比如 Cluster 不支持事务，Cluster 的 `mget` 方法相比 Redis 要慢很多，被拆分成了多个 `get` 指令，Cluster 的 `rename` 方法不再是原子的，它需要将数据从原节点转移到目标节点。
+
+### 槽位迁移感知
+
+如果 Cluster 中某个槽位正在迁移或者已经迁移完了，client 如何能感知到槽位的变化呢？客户端保存了槽位和节点的映射关系表，它需要即时得到更新，才可以正常地将某条指令发到正确的节点中。
+
+我们前面提到 Cluster 有两个特殊的 `error` 指令，一个是 `moved`，一个是 `asking`。
+
+第一个 `moved` 是用来纠正槽位的。如果我们将指令发送到了错误的节点，该节点发现对应的指令槽位不归自己管理，就会将目标节点的地址随同 `moved` 指令回复给客户端通知客户端去目标节点去访问。这个时候客户端就会刷新自己的槽位关系表，然后重试指令，后续所有打在该槽位的指令都会转到目标节点。
+
+第二个 `asking` 指令和 `moved` 不一样，它是用来临时纠正槽位的。如果当前槽位正处于迁移中，指令会先被发送到槽位所在的旧节点，如果旧节点存在数据，那就直接返回结果了，如果不存在，那么它可能真的不存在也可能在迁移目标节点上。所以旧节点会通知客户端去新节点尝试一下拿数据，看看新节点有没有。这时候就会给客户端返回一个 `asking error` 携带上目标节点的地址。客户端收到这个 `asking error` 后，就会去目标节点去尝试。客户端不会刷新槽位映射关系表，因为它只是临时纠正该指令的槽位信息，不影响后续指令。
+
+**重试 2 次**
+
+`moved` 和 `asking` 指令都是重试指令，客户端会因为这两个指令多重试一次。读者有没有想过会不会存在一种情况，客户端有可能重试 2 次呢？这种情况是存在的，比如一条指令被发送到错误的节点，这个节点会先给你一个 `moved` 错误告知你去另外一个节点重试。所以客户端就去另外一个节点重试了，结果刚好这个时候运维人员要对这个槽位进行迁移操作，于是给客户端回复了一个 `asking` 指令告知客户端去目标节点去重试指令。所以这里客户端重试了 2 次。
+
+**重试多次**
+
+在某些特殊情况下，客户端甚至会重试多次，读者可以开发一下自己的脑洞想一想什么情况下会重试多次。
+
+正是因为存在多次重试的情况，所以客户端的源码里在执行指令时都会有一个循环，然后会设置一个最大重试次数，Java 和 Python 都有这个参数，只是设置的值不一样。当重试次数超过这个值时，客户端会直接向业务层抛出异常。
+
+### 集群变更感知
+
+当服务器节点变更时，客户端应该即时得到通知以实时刷新自己的节点关系表。那客户端是如何得到通知的呢？这里要分 2 种情况：
+
+1. 目标节点挂掉了，客户端会抛出一个 `ConnectionError`，紧接着会随机挑一个节点来重试，这时被重试的节点会通过 `moved error` 告知目标槽位被分配到的新的节点地址。
+2. 运维手动修改了集群信息，将 master 切换到其它节点，并将旧的 master 移除集群。这时打在旧节点上的指令会收到一个 `ClusterDown` 的错误，告知当前节点所在集群不可用 (当前节点已经被孤立了，它不再属于之前的集群)。这时客户端就会关闭所有的连接，清空槽位映射关系表，然后向上层抛错。待下一条指令过来时，就会重新尝试初始化节点信息。
+
+### 思考 & 作业
+
+1. 请读者自己尝试搭建 Cluster 集群。
+2. 使用客户端连接集群进行一些常规指令的操作体验。
+
+
+
+## 拓展篇
+
+## 1 Stream
+
+Redis5.0 被作者 Antirez 突然放了出来，增加了很多新的特色功能。而 Redis5.0 最大的新特性就是多出了一个数据结构 **Stream**，它是一个新的强大的支持多播的可持久化的消息队列，作者坦言 Redis Stream 狠狠地借鉴了 Kafka 的设计。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/6/1/163bae206a809d56?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+Redis Stream 的结构如上图所示，它有一个消息链表，将所有加入的消息都串起来，每个消息都有一个唯一的 ID 和对应的内容。消息是持久化的，Redis 重启后，内容还在。
+
+每个 Stream 都有唯一的名称，它就是 Redis 的 key，在我们首次使用`xadd`指令追加消息时自动创建。
+
+每个 Stream 都可以挂多个消费组，每个消费组会有个游标`last_delivered_id`在 Stream 数组之上往前移动，表示当前消费组已经消费到哪条消息了。每个消费组都有一个 Stream 内唯一的名称，消费组不会自动创建，它需要单独的指令`xgroup create`进行创建，需要指定从 Stream 的某个消息 ID 开始消费，这个 ID 用来初始化`last_delivered_id`变量。
+
+每个消费组 (Consumer Group) 的状态都是独立的，相互不受影响。也就是说同一份 Stream 内部的消息会被每个消费组都消费到。
+
+同一个消费组 (Consumer Group) 可以挂接多个消费者 (Consumer)，这些消费者之间是竞争关系，任意一个消费者读取了消息都会使游标`last_delivered_id`往前移动。每个消费者有一个组内唯一名称。
+
+消费者 (Consumer) 内部会有个状态变量`pending_ids`，它记录了当前已经被客户端读取的消息，但是还没有 ack。如果客户端没有 ack，这个变量里面的消息 ID 会越来越多，一旦某个消息被 ack，它就开始减少。这个 pending_ids 变量在 Redis 官方被称之为`PEL`，也就是`Pending Entries List`，这是一个很核心的数据结构，它用来确保客户端至少消费了消息一次，而不会在网络传输的中途丢失了没处理。
+
+### **消息 ID**
+
+消息 ID 的形式是`timestampInMillis-sequence`，例如`1527846880572-5`，它表示当前的消息在毫米时间戳`1527846880572`时产生，并且是该毫秒内产生的第 5 条消息。消息 ID 可以由服务器自动生成，也可以由客户端自己指定，但是形式必须是`整数-整数`，而且必须是后面加入的消息的 ID 要大于前面的消息 ID。
+
+### **消息内容**
+
+消息内容就是键值对，形如 hash 结构的键值对，这没什么特别之处。
+
+### **增删改查**
+
+1. `xadd` 追加消息
+2. `xdel` 删除消息，这里的删除仅仅是设置了标志位，不影响消息总长度
+3. `xrange` 获取消息列表，会自动过滤已经删除的消息
+4. `xlen` 消息长度
+5. `del` 删除 Stream
+
+```
+# * 号表示服务器自动生成 ID，后面顺序跟着一堆 key/value
+#  名字叫 laoqian，年龄 30 岁
+127.0.0.1:6379> xadd codehole * name laoqian age 30  
+1527849609889-0  # 生成的消息 ID
+127.0.0.1:6379> xadd codehole * name xiaoyu age 29
+1527849629172-0
+127.0.0.1:6379> xadd codehole * name xiaoqian age 1
+1527849637634-0
+127.0.0.1:6379> xlen codehole
+(integer) 3
+# -表示最小值 , + 表示最大值
+127.0.0.1:6379> xrange codehole - +
+127.0.0.1:6379> xrange codehole - +
+1) 1) 1527849609889-0
+   2) 1) "name"
+      2) "laoqian"
+      3) "age"
+      4) "30"
+2) 1) 1527849629172-0
+   2) 1) "name"
+      2) "xiaoyu"
+      3) "age"
+      4) "29"
+3) 1) 1527849637634-0
+   2) 1) "name"
+      2) "xiaoqian"
+      3) "age"
+      4) "1"
+# 指定最小消息 ID 的列表
+127.0.0.1:6379> xrange codehole 1527849629172-0 +  
+1) 1) 1527849629172-0
+   2) 1) "name"
+      2) "xiaoyu"
+      3) "age"
+      4) "29"
+2) 1) 1527849637634-0
+   2) 1) "name"
+      2) "xiaoqian"
+      3) "age"
+      4) "1"
+# 指定最大消息 ID 的列表
+127.0.0.1:6379> xrange codehole - 1527849629172-0
+1) 1) 1527849609889-0
+   2) 1) "name"
+      2) "laoqian"
+      3) "age"
+      4) "30"
+2) 1) 1527849629172-0
+   2) 1) "name"
+      2) "xiaoyu"
+      3) "age"
+      4) "29"
+127.0.0.1:6379> xdel codehole 1527849609889-0
+(integer) 1
+# 长度不受影响
+127.0.0.1:6379> xlen codehole
+(integer) 3
+# 被删除的消息没了
+127.0.0.1:6379> xrange codehole - +
+1) 1) 1527849629172-0
+   2) 1) "name"
+      2) "xiaoyu"
+      3) "age"
+      4) "29"
+2) 1) 1527849637634-0
+   2) 1) "name"
+      2) "xiaoqian"
+      3) "age"
+      4) "1"
+# 删除整个 Stream
+127.0.0.1:6379> del codehole
+(integer) 1
+```
+
+### **独立消费**
+
+我们可以在不定义消费组的情况下进行 Stream 消息的独立消费，当 Stream 没有新消息时，甚至可以阻塞等待。Redis 设计了一个单独的消费指令`xread`，可以将 Stream 当成普通的消息队列 (list) 来使用。使用 `xread` 时，我们可以完全忽略消费组 (Consumer Group) 的存在，就好比 Stream 就是一个普通的列表 (list)。
+
+```
+# 从 Stream 头部读取两条消息
+127.0.0.1:6379> xread count 2 streams codehole 0-0
+1) 1) "codehole"
+   2) 1) 1) 1527851486781-0
+         2) 1) "name"
+            2) "laoqian"
+            3) "age"
+            4) "30"
+      2) 1) 1527851493405-0
+         2) 1) "name"
+            2) "yurui"
+            3) "age"
+            4) "29"
+# 从 Stream 尾部读取一条消息，毫无疑问，这里不会返回任何消息
+127.0.0.1:6379> xread count 1 streams codehole $
+(nil)
+# 从尾部阻塞等待新消息到来，下面的指令会堵住，直到新消息到来
+127.0.0.1:6379> xread block 0 count 1 streams codehole $
+# 我们从新打开一个窗口，在这个窗口往 Stream 里塞消息
+127.0.0.1:6379> xadd codehole * name youming age 60
+1527852774092-0
+# 再切换到前面的窗口，我们可以看到阻塞解除了，返回了新的消息内容
+# 而且还显示了一个等待时间，这里我们等待了 93s
+127.0.0.1:6379> xread block 0 count 1 streams codehole $
+1) 1) "codehole"
+   2) 1) 1) 1527852774092-0
+         2) 1) "name"
+            2) "youming"
+            3) "age"
+            4) "60"
+(93.11s)
+```
+
+客户端如果想要使用 `xread` 进行顺序消费，一定要记住当前消费到哪里了，也就是返回的消息 ID。下次继续调用 `xread` 时，将上次返回的最后一个消息 ID 作为参数传递进去，就可以继续消费后续的消息。
+
+block 0 表示永远阻塞，直到消息到来，block 1000 表示阻塞 1s，如果 1s 内没有任何消息到来，就返回 `nil`。
+
+```
+127.0.0.1:6379> xread block 1000 count 1 streams codehole $
+(nil)
+(1.07s)
+```
+
+### **创建消费组**
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/6/1/163bbe4d6f601f8e?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+Stream 通过
+
+```
+xgroup create
+```
+
+指令创建消费组 (Consumer Group)，需要传递起始消息 ID 参数用来初始化
+
+```
+last_delivered_id
+```
+
+变量。
+
+
+
+```
+#  表示从头开始消费
+127.0.0.1:6379> xgroup create codehole cg1 0-0
+OK
+# $ 表示从尾部开始消费，只接受新消息，当前 Stream 消息会全部忽略
+127.0.0.1:6379> xgroup create codehole cg2 $
+OK
+# 获取 Stream 信息
+127.0.0.1:6379> xinfo stream codehole
+ 1) length
+ 2) (integer) 3  # 共 3 个消息
+ 3) radix-tree-keys
+ 4) (integer) 1
+ 5) radix-tree-nodes
+ 6) (integer) 2
+ 7) groups
+ 8) (integer) 2  # 两个消费组
+ 9) first-entry  # 第一个消息
+10) 1) 1527851486781-0
+    2) 1) "name"
+       2) "laoqian"
+       3) "age"
+       4) "30"
+11) last-entry  # 最后一个消息
+12) 1) 1527851498956-0
+    2) 1) "name"
+       2) "xiaoqian"
+       3) "age"
+       4) "1"
+# 获取 Stream 的消费组信息
+127.0.0.1:6379> xinfo groups codehole
+1) 1) name
+   2) "cg1"
+   3) consumers
+   4) (integer) 0  # 该消费组还没有消费者
+   5) pending
+   6) (integer) 0  # 该消费组没有正在处理的消息
+2) 1) name
+   2) "cg2"
+   3) consumers  # 该消费组还没有消费者
+   4) (integer) 0
+   5) pending
+   6) (integer) 0  # 该消费组没有正在处理的消息
+```
+
+### **消费**
+
+Stream 提供了 `xreadgroup` 指令可以进行消费组的组内消费，需要提供消费组名称、消费者名称和起始消息 ID。它同 `xread` 一样，也可以阻塞等待新消息。读到新消息后，对应的消息 ID 就会进入消费者的 PEL(正在处理的消息) 结构里，客户端处理完毕后使用 `xack` 指令通知服务器，本条消息已经处理完毕，该消息 ID 就会从 PEL 中移除。
+
+```
+# > 号表示从当前消费组的 last_delivered_id 后面开始读
+# 每当消费者读取一条消息，last_delivered_id 变量就会前进
+127.0.0.1:6379> xreadgroup GROUP cg1 c1 count 1 streams codehole >
+1) 1) "codehole"
+   2) 1) 1) 1527851486781-0
+         2) 1) "name"
+            2) "laoqian"
+            3) "age"
+            4) "30"
+127.0.0.1:6379> xreadgroup GROUP cg1 c1 count 1 streams codehole >
+1) 1) "codehole"
+   2) 1) 1) 1527851493405-0
+         2) 1) "name"
+            2) "yurui"
+            3) "age"
+            4) "29"
+127.0.0.1:6379> xreadgroup GROUP cg1 c1 count 2 streams codehole >
+1) 1) "codehole"
+   2) 1) 1) 1527851498956-0
+         2) 1) "name"
+            2) "xiaoqian"
+            3) "age"
+            4) "1"
+      2) 1) 1527852774092-0
+         2) 1) "name"
+            2) "youming"
+            3) "age"
+            4) "60"
+# 再继续读取，就没有新消息了
+127.0.0.1:6379> xreadgroup GROUP cg1 c1 count 1 streams codehole >
+(nil)
+# 那就阻塞等待吧
+127.0.0.1:6379> xreadgroup GROUP cg1 c1 block 0 count 1 streams codehole >
+# 开启另一个窗口，往里塞消息
+127.0.0.1:6379> xadd codehole * name lanying age 61
+1527854062442-0
+# 回到前一个窗口，发现阻塞解除，收到新消息了
+127.0.0.1:6379> xreadgroup GROUP cg1 c1 block 0 count 1 streams codehole >
+1) 1) "codehole"
+   2) 1) 1) 1527854062442-0
+         2) 1) "name"
+            2) "lanying"
+            3) "age"
+            4) "61"
+(36.54s)
+# 观察消费组信息
+127.0.0.1:6379> xinfo groups codehole
+1) 1) name
+   2) "cg1"
+   3) consumers
+   4) (integer) 1  # 一个消费者
+   5) pending
+   6) (integer) 5  # 共 5 条正在处理的信息还有没有 ack
+2) 1) name
+   2) "cg2"
+   3) consumers
+   4) (integer) 0  # 消费组 cg2 没有任何变化，因为前面我们一直在操纵 cg1
+   5) pending
+   6) (integer) 0
+# 如果同一个消费组有多个消费者，我们可以通过 xinfo consumers 指令观察每个消费者的状态
+127.0.0.1:6379> xinfo consumers codehole cg1  # 目前还有 1 个消费者
+1) 1) name
+   2) "c1"
+   3) pending
+   4) (integer) 5  # 共 5 条待处理消息
+   5) idle
+   6) (integer) 418715  # 空闲了多长时间 ms 没有读取消息了
+# 接下来我们 ack 一条消息
+127.0.0.1:6379> xack codehole cg1 1527851486781-0
+(integer) 1
+127.0.0.1:6379> xinfo consumers codehole cg1
+1) 1) name
+   2) "c1"
+   3) pending
+   4) (integer) 4  # 变成了 5 条
+   5) idle
+   6) (integer) 668504
+# 下面 ack 所有消息
+127.0.0.1:6379> xack codehole cg1 1527851493405-0 1527851498956-0 1527852774092-0 1527854062442-0
+(integer) 4
+127.0.0.1:6379> xinfo consumers codehole cg1
+1) 1) name
+   2) "c1"
+   3) pending
+   4) (integer) 0  # pel 空了
+   5) idle
+   6) (integer) 745505
+```
+
+### **Stream 消息太多怎么办?**
+
+读者很容易想到，要是消息积累太多，Stream 的链表岂不是很长，内容会不会爆掉?`xdel` 指令又不会删除消息，它只是给消息做了个标志位。
+
+Redis 自然考虑到了这一点，所以它提供了一个定长 Stream 功能。在 `xadd` 的指令提供一个定长长度 `maxlen`，就可以将老的消息干掉，确保最多不超过指定长度。
+
+```
+127.0.0.1:6379> xlen codehole
+(integer) 5
+127.0.0.1:6379> xadd codehole maxlen 3 * name xiaorui age 1
+1527855160273-0
+127.0.0.1:6379> xlen codehole
+(integer) 3
+```
+
+我们看到 Stream 的长度被砍掉了。如果 Stream 在未来可以提供按时间戳清理消息的规则那就更加完美了，但是目前还没有。
+
+### **消息如果忘记 ACK 会怎样?**
+
+Stream 在每个消费者结构中保存了正在处理中的消息 ID 列表 PEL，如果消费者收到了消息处理完了但是没有回复 ack，就会导致 PEL 列表不断增长，如果有很多消费组的话，那么这个 PEL 占用的内存就会放大。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/16/164a2a4cd39eb25e?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+### **PEL 如何避免消息丢失?**
+
+在客户端消费者读取 Stream 消息时，Redis 服务器将消息回复给客户端的过程中，客户端突然断开了连接，消息就丢失了。但是 PEL 里已经保存了发出去的消息 ID。待客户端重新连上之后，可以再次收到 PEL 中的消息 ID 列表。不过此时 `xreadgroup` 的起始消息 ID 不能为参数>，而必须是任意有效的消息 ID，一般将参数设为 0-0，表示读取所有的 PEL 消息以及自`last_delivered_id`之后的新消息。
+
+### **Stream 的高可用**
+
+Stream 的高可用是建立主从复制基础上的，它和其它数据结构的复制机制没有区别，也就是说在 Sentinel 和 Cluster 集群环境下 Stream 是可以支持高可用的。不过鉴于 Redis 的指令复制是异步的，在 `failover` 发生时，Redis 可能会丢失极小部分数据，这点 Redis 的其它数据结构也是一样的。
+
+### **分区 Partition**
+
+Redis 的服务器没有原生支持分区能力，如果想要使用分区，那就需要分配多个 Stream，然后在客户端使用一定的策略来生产消息到不同的 Stream。你也许会认为 Kafka 要先进很多，它是原生支持 Partition 的。关于这一点，我并不认同。记得 Kafka 的客户端也存在 HashStrategy 么，因为它也是通过客户端的 hash 算法来将不同的消息塞入不同分区的。
+
+另外,Kafka 还支持动态增加分区数量的能力，但是这种调整能力也是很蹩脚的，它不会把之前已经存在的内容进行 rehash，不会重新分区历史数据。这种简单的动态调整的能力 Redis Stream 通过增加新的 Stream 就可以做到。
+
+### 小结
+
+Stream 的消费模型借鉴了 Kafka 的消费分组的概念，它弥补了 Redis Pub/Sub 不能持久化消息的缺陷。但是它又不同于 kafka，Kafka 的消息可以分 partition，而 Stream 不行。如果非要分 parition 的话，得在客户端做，提供不同的 Stream 名称，对消息进行 hash 取模来选择往哪个 Stream 里塞。
+
+如果读者稍微研究过 Redis 作者的另一个开源项目 Disque 的话，这极可能是作者意识到 Disque 项目的活跃程度不够，所以将 Disque 的内容移植到了 Redis 里面。这只是本人的猜测，未必是作者的初衷。如果读者有什么不同的想法，可以在评论区一起参与讨论。
+
+
+
+## 2 Info 指令
+
+在使用 Redis 时，时常会遇到很多问题需要诊断，在诊断之前需要了解 Redis 的运行状态，通过强大的 Info 指令，你可以清晰地知道 Redis 内部一系列运行参数。
+
+Info 指令显示的信息非常繁多，分为 9 大块，每个块都有非常多的参数，这 9 个块分别是:
+
+1. Server 服务器运行的环境参数
+2. Clients 客户端相关信息
+3. Memory 服务器运行内存统计数据
+4. Persistence 持久化信息
+5. Stats 通用统计数据
+6. Replication 主从复制相关信息
+7. CPU CPU 使用情况
+8. Cluster 集群信息
+9. KeySpace 键值对统计数量信息
+
+Info 可以一次性获取所有的信息，也可以按块取信息。
+
+```
+# 获取所有信息
+> info
+# 获取内存相关信息
+> info memory
+# 获取复制相关信息
+> info replication
+```
+
+考虑到参数非常繁多，一一说明工作量巨大，下面我只挑一些关键性的、非常实用和最常用的参数进行详细讲解。如果读者想要了解所有的参数细节，请参考阅读 [Redis 官网文档](https://link.juejin.im/?target=https%3A%2F%2Fredis.io%2Fcommands%2Finfo)。
+
+### Redis 每秒执行多少次指令？
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/16/164a14ce6633c24a?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+这个信息在 Stats 块里，可以通过 `info stats` 看到。
+
+```
+# ops_per_sec: operations per second，也就是每秒操作数
+> redis-cli info stats |grep ops
+instantaneous_ops_per_sec:789
+```
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/13/1649181bd00bed33?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+以上，表示 ops 是 789，也就是所有客户端每秒会发送 789 条指令到服务器执行。极限情况下，Redis 可以每秒执行 10w 次指令，CPU 几乎完全榨干。如果 qps 过高，可以考虑通过 
+
+```
+monitor
+```
+
+ 指令快速观察一下究竟是哪些 key 访问比较频繁，从而在相应的业务上进行优化，以减少 IO 次数。
+
+```
+monitor
+```
+
+ 指令会瞬间吐出来巨量的指令文本，所以一般在执行 
+
+```
+monitor
+```
+
+ 后立即 
+
+```
+ctrl+c
+```
+
+中断输出。
+
+
+
+```
+> redis-cli monitor
+```
+
+### Redis 连接了多少客户端？
+
+这个信息在 Clients 块里，可以通过 `info clients` 看到。
+
+```
+> redis-cli info clients
+# Clients
+connected_clients:124  # 这个就是正在连接的客户端数量
+client_longest_output_list:0
+client_biggest_input_buf:0
+blocked_clients:0
+```
+
+这个信息也是比较有用的，通过观察这个数量可以确定是否存在意料之外的连接。如果发现这个数量不对劲，接着就可以使用`client list`指令列出所有的客户端链接地址来确定源头。
+
+关于客户端的数量还有个重要的参数需要观察，那就是`rejected_connections`，它表示因为超出最大连接数限制而被拒绝的客户端连接次数，如果这个数字很大，意味着服务器的最大连接数设置的过低需要调整 `maxclients` 参数。
+
+```
+> redis-cli info stats |grep reject
+rejected_connections:0
+```
+
+### Redis 内存占用多大 ?
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/16/164a14efc8e3e44b?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+这个信息在 Memory 块里，可以通过 `info memory` 看到。
+
+```
+> redis-cli info memory | grep used | grep human
+used_memory_human:827.46K # 内存分配器 (jemalloc) 从操作系统分配的内存总量
+used_memory_rss_human:3.61M  # 操作系统看到的内存占用 ,top 命令看到的内存
+used_memory_peak_human:829.41K  # Redis 内存消耗的峰值
+used_memory_lua_human:37.00K # lua 脚本引擎占用的内存大小
+```
+
+如果单个 Redis 内存占用过大，并且在业务上没有太多压缩的空间的话，可以考虑集群化了。
+
+### 复制积压缓冲区多大？
+
+这个信息在 Replication 块里，可以通过 `info replication` 看到。
+
+```
+> redis-cli info replication |grep backlog
+repl_backlog_active:0
+repl_backlog_size:1048576  # 这个就是积压缓冲区大小
+repl_backlog_first_byte_offset:0
+repl_backlog_histlen:0
+```
+
+复制积压缓冲区大小非常重要，它严重影响到主从复制的效率。当从库因为网络原因临时断开了主库的复制，然后网络恢复了，又重新连上的时候，这段断开的时间内发生在 master 上的修改操作指令都会放在积压缓冲区中，这样从库可以通过积压缓冲区恢复中断的主从同步过程。
+
+积压缓冲区是环形的，后来的指令会覆盖掉前面的内容。如果从库断开的时间过长，或者缓冲区的大小设置的太小，都会导致从库无法快速恢复中断的主从同步过程，因为中间的修改指令被覆盖掉了。这时候从库就会进行全量同步模式，非常耗费 CPU 和网络资源。
+
+如果有多个从库复制，积压缓冲区是共享的，它不会因为从库过多而线性增长。如果实例的修改指令请求很频繁，那就把积压缓冲区调大一些，几十个 M 大小差不多了，如果很闲，那就设置为几个 M。
+
+```
+> redis-cli info stats | grep sync
+sync_full:0
+sync_partial_ok:0
+sync_partial_err:0  # 半同步失败次数
+```
+
+通过查看`sync_partial_err`变量的次数来决定是否需要扩大积压缓冲区，它表示主从半同步复制失败的次数。
+
+
+
+##3 再谈分布式锁 RedLock
+
+在第三节，我们细致讲解了分布式锁的原理，它的使用非常简单，一条指令就可以完成加锁操作。不过在集群环境下，这种方式是有缺陷的，它不是绝对安全的。
+
+比如在 Sentinel 集群中，主节点挂掉时，从节点会取而代之，客户端上却并没有明显感知。原先第一个客户端在主节点中申请成功了一把锁，但是这把锁还没有来得及同步到从节点，主节点突然挂掉了。然后从节点变成了主节点，这个新的节点内部没有这个锁，所以当另一个客户端过来请求加锁时，立即就批准了。这样就会导致系统中同样一把锁被两个客户端同时持有，不安全性由此产生。
+
+
+
+![img](https://user-gold-cdn.xitu.io/2018/7/16/164a15b65d4cd15a?imageView2/0/w/1280/h/960/format/webp/ignore-error/1)
+
+
+
+不过这种不安全也仅仅是在主从发生 failover 的情况下才会产生，而且持续时间极短，业务系统多数情况下可以容忍。
+
+### Redlock 算法
+
+为了解决这个问题，Antirez 发明了 Redlock 算法，它的流程比较复杂，不过已经有了很多开源的 library 做了良好的封装，用户可以拿来即用，比如 redlock-py。
+
+```
+import redlock
+
+addrs = [{
+    "host": "localhost",
+    "port": 6379,
+    "db": 0
+}, {
+    "host": "localhost",
+    "port": 6479,
+    "db": 0
+}, {
+    "host": "localhost",
+    "port": 6579,
+    "db": 0
+}]
+dlm = redlock.Redlock(addrs)
+success = dlm.lock("user-lck-laoqian", 5000)
+if success:
+    print 'lock success'
+    dlm.unlock('user-lck-laoqian')
+else:
+    print 'lock failed'
+```
+
+为了使用 Redlock，需要提供多个 Redis 实例，这些实例之前相互独立没有主从关系。同很多分布式算法一样，redlock 也使用「大多数机制」。
+
+加锁时，它会向过半节点发送 `set(key, value, nx=True, ex=xxx)` 指令，只要过半节点 `set` 成功，那就认为加锁成功。释放锁时，需要向所有节点发送 `del` 指令。不过 Redlock 算法还需要考虑出错重试、时钟漂移等很多细节问题，同时因为 Redlock 需要向多个节点进行读写，意味着相比单实例 Redis 性能会下降一些。
+
+### Redlock 使用场景
+
+如果你很在乎高可用性，希望挂了一台 redis 完全不受影响，那就应该考虑 redlock。不过代价也是有的，需要更多的 redis 实例，性能也下降了，代码上还需要引入额外的 library，运维上也需要特殊对待，这些都是需要考虑的成本，使用前请再三斟酌。
+
+### 扩展阅读
+
+#### 1. [你以为 Redlock 算法真的很完美？](https://link.juejin.im/?target=http%3A%2F%2Fmartin.kleppmann.com%2F2016%2F02%2F08%2Fhow-to-do-distributed-locking.html)
