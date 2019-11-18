@@ -32,10 +32,6 @@ http://www.mybatis.org/mybatis-3/
 
 
 
-
-
-
-
 - 一级缓存(默认开启)
 
 1.  一级缓存的范围有SESSION和STATEMENT两种，默认是SESSION，如果我们不需要使用一级缓存，那么我们可以把一级缓存的范围指定为STATEMENT
@@ -49,3 +45,8 @@ mapper级别的缓存
 
 1. 连表时候，副mapper更新不会联动更新主mapper的被关联表缓存。即脏数据
 2. 全部失效，缓存id 1、2、3数据，update id=1，全清空，不细致。
+
+
+
+![](mybatis.assets/20181114145636581.png)
+
