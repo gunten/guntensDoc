@@ -64,6 +64,42 @@ mysql> select SQL_CACHE * from T where ID=10；
 
 ###  redo log（重做日志）   
 
+**InnoDB 引擎特有的日志** 
+
 就像赊账黑板一样，先记录，后批存，也叫  WAL 技术，WAL 的全称是 Write-Ahead Logging，它的关键点就是先写日志，再写磁盘。==注意这里是顺序写喔，因此能提升性能==
 
   具体来说，当有一条记录需要更新的时候，InnoDB 引擎就会先把记录写到 redo log（粉板）里面，并更新内存，这个时候更新就算完成了。同时，InnoDB 引擎会在适当的时候，将这个操作记录更新到磁盘里面   
+
+
+
+<img src="MySQL.assets/image-20191118123413032.png" alt="image-20191118123413032" style="zoom: 33%;" />
+
+  write pos 是当前记录的位置，一边写一边后移，写到第 3 号文件末尾后就回到 0 号文件开头。checkpoint 是当前要擦除的位置，也是往后推移并且循环的，擦除记录前要把记录更新到数据文件。   
+
+  有了 redo log，InnoDB 就可以保证即使数据库发生异常重启，之前提交的记录都不会丢失，这个能力称为**crash-safe**
+
+
+
+###  binlog（归档日志）   
+
+**server层特有的日志**
+
+update语句执行流程图
+
+<img src="MySQL.assets/image-20191118124137487.png" alt="image-20191118124137487" style="zoom: 25%;" />
+
+
+
+### 区别
+
+1. redo log 是 InnoDB 引擎特有的；binlog 是 MySQL 的 Server 层实现的，所有引擎都可以使用。
+2. redo log 是物理日志，记录的是“在某个数据页上做了什么修改”；binlog 是逻辑日志，记录的是这个语句的原始逻辑，比如“给 ID=2 这一行的 c 字段加 1 ”。
+3. redo log 是循环写的，空间固定会用完；binlog 是可以追加写入的。“追加写”是指 binlog 文件写到一定大小后会切换到下一个，并不会覆盖以前的日志。
+
+###二阶段提交
+
+1 prepare阶段 2 写binlog 3 commit
+
+当在2之前崩溃时重启恢复：后发现没有commit，回滚。备份恢复：没有binlog 。一致
+
+当在3之前崩溃重启恢复：虽没有commit，但满足prepare和binlog完整，所以重启后会自动commit。备份：有binlog. 一致
