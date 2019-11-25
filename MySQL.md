@@ -108,7 +108,7 @@ update语句执行流程图
 
 ## 事务隔离
 
- 1、事务的特性：ACID（Atomicity、Consistency、Isolation、Durability，即原子性、一致性、隔离性、持久性
+1、事务的特性：ACID（Atomicity、Consistency、Isolation、Durability，即原子性、一致性、隔离性、持久性
 2、多事务同时执行的时候，可能会出现的问题：脏读、不可重复读、幻读
 
 >  所谓脏读是指一个事务中访问到了另外一个事务未提交的数据 
@@ -137,6 +137,33 @@ update语句执行流程图
 
 10、事务启动方式：一、显式启动事务语句，begin或者start transaction,提交commit，回滚rollback；二、set autocommit=0，该命令会把这个线程的自动提交关掉。这样只要执行一个select语句，事务就启动，并不会自动提交，直到主动执行commit或rollback或断开连接。
 11、建议使用方法一，如果考虑多一次交互问题，可以使用commit work and chain语法。在autocommit=1的情况下用begin显式启动事务，如果执行commit则提交事务。如果执行commit work and chain则提交事务并自动启动下一个事务。 
+
+
+
+###视图
+
+1.innodb支持RC和RR隔离级别实现是用的一致性视图(consistent read view)
+
+2.事务在启动时会拍一个快照,这个快照是基于整个库的.
+基于整个库的意思就是说一个事务内,整个库的修改对于该事务都是不可见的(对于快照读的情况)
+如果在事务内select t表,另外的事务执行了DDL t表,根据发生时间,要嘛锁住要嘛报错(参考第六章)
+
+###MVCC（Multiversion Currency Control）
+
+3.事务是如何实现的MVCC呢?
+(1)每个事务都有一个事务ID,叫做transaction id(严格递增)
+(2)事务在启动时,找到已提交的最大事务ID记为up_limit_id。
+(3)事务在更新一条语句时,比如id=1改为了id=2.会把id=1和该行之前的row trx_id写到undo log里,
+并且在数据页上把id的值改为2,并且把修改这条语句的transaction id记在该行行头
+(4)再定一个规矩,一个事务要查看一条数据时,必须先用该事务的up_limit_id与该行的transaction id做比对,
+如果up_limit_id>=transaction id,那么可以看.如果up_limit_id<transaction id,则只能去undo log里去取。去undo log查找数据的时候,也需要做比对,必须up_limit_id>transaction id,才返回数据
+
+4.什么是当前读,由于当前读都是先读后写,只能读当前的值,所以为当前读.会更新事务内的up_limit_id为该事务的transaction id
+
+5.为什么rr能实现可重复读而rc不能,分两种情况
+(1)快照读的情况下,rr不能更新事务内的up_limit_id,
+  而rc每次会把up_limit_id更新为快照读之前最新已提交事务的transaction id,则rc不能可重复读
+(2)当前读的情况下,rr是利用record lock+gap lock来实现的,而rc没有gap,所以rc不能可重复读 
 
 
 
@@ -171,6 +198,8 @@ MySQL5.6引入的索引下推优化，可以在索引遍历过程中，对索引
 
  MySQL里面的锁可以分为：全局锁、表级锁、行级锁 
 
+全局锁、表锁 service层实现
+
 ### 全局锁
 
 MySQL提供加全局读锁的方法：**Flush tables with read lock(FTWRL)**
@@ -195,6 +224,10 @@ MySQL提供加全局读锁的方法：**Flush tables with read lock(FTWRL)**
 ### 表级锁
 
  MySQL里面表级锁有两种，一种是表锁，一种是元数据锁(meta data lock,MDL) 
+
+表锁用来互斥DML
+
+MDL用来互斥DML与DDL？
 
 #### 	表锁
 
@@ -259,3 +292,21 @@ DDL 从主库传过来的时间按照效果不同，我打了四个时刻。题�
 如果在“时刻 2”和“时刻 3”之间到达，mysqldump 占着 t1 的 MDL 读锁，binlog 被阻塞，现象：主从延迟，直到 Q6 执行完成。
 
 从“时刻 4”开始，mysqldump 释放了 MDL 读锁，现象：没有影响，备份拿到的是 DDL 前的表结构。
+
+
+
+### 行锁
+
+**两阶段锁**：在 InnoDB 事务中，行锁是在需要的时候才加上的，但并不是不需要了就立刻释放， 而是要等到事务结束时才释放。
+==建议==：如果你的事务中需要锁多个行，要把最可能造成锁冲突、最可能影响并发度的锁尽量往后放。
+
+**死锁**：当并发系统中不同线程出现循环资源依赖，涉及的线程都在等待别的线程释放资源时，就会导致这几个线程都进入无限等待的状态。
+解决方案：
+1、通过参数 innodb_lock_wait_timeout 根据实际业务场景来设置超时时间，InnoDB引擎默认值是50s。
+2、发起死锁检测，发现死锁后，主动回滚死锁链条中的某一个事务，让其他事务得以继续执行。将参数 innodb_deadlock_detect 设置为 on，表示开启这个逻辑（默认是开启状态）。
+如何解决热点行更新导致的性能问题？
+1、如果你能确保这个业务一定不会出现死锁，可以临时把死锁检测关闭掉。一般不建议采用
+2、控制并发度，对应相同行的更新，在进入引擎之前排队。这样在InnoDB内部就不会有大量的死锁检测工作了。(中间件实现或改mysql源码)
+3、将热更新的行数据拆分成逻辑上的多行来减少锁冲突，但是业务复杂度可能会大大提高。
+
+innodb行级锁是通过锁索引记录实现的，如果更新的列没建索引是会根据主键索引逐行扫描 逐行加锁 。 
