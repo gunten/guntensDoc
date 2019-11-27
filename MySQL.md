@@ -123,8 +123,8 @@ update语句执行流程图
 4、不同事务隔离级别的区别：
 读未提交：一个事务还未提交，它所做的变更就可以被别的事务看到
 读提交：一个事务提交之后，它所做的变更才可以被别的事务看到
-可重复读：一个事务执行过程中看到的数据是一致的。未提交的更改对其他事务是不可见的
-串行化：对应一个记录会加读写锁，出现冲突的时候，后访问的事务必须等前一个事务执行完成才能继续执行
+可重复读： 一个事务执行过程中看到的数据，跟这个事务在启动时看到的数据是一致的 。 未提交变更对其他事务也是不可见的 
+串行化： 对于同一行记录，“写”会加“写锁”，“读”会加“读锁”。当出现读写锁冲突的时候 ，后访问的事务必须等前一个事务执行完成才能继续执行
 5、配置方法：启动参数transaction-isolation
 6、事务隔离的实现：每条记录在更新的时候都会同时记录一条回滚操作。同一条记录在系统中可以存在多个版本，这就是数据库的多版本并发控制（MVCC）。
 7、回滚日志什么时候删除？系统会判断当没有事务需要用到这些回滚日志的时候，回滚日志会被删除。
@@ -135,32 +135,101 @@ update语句执行流程图
 >
 >  select * from information_schema.innodb_trx where TIME_TO_SEC(timediff(now(),trx_started))>60 
 
-10、事务启动方式：一、显式启动事务语句，begin或者start transaction,提交commit，回滚rollback；二、set autocommit=0，该命令会把这个线程的自动提交关掉。这样只要执行一个select语句，事务就启动，并不会自动提交，直到主动执行commit或rollback或断开连接。
+10、事务启动方式：
+
+一、显式启动事务语句，begin或者start transaction,提交commit，回滚rollback；
+
+二、set autocommit=0，该命令会把这个线程的自动提交关掉。这样只要执行一个select语句，事务就启动，并不会自动提交，直到主动执行commit或rollback或断开连接。
 11、建议使用方法一，如果考虑多一次交互问题，可以使用commit work and chain语法。在autocommit=1的情况下用begin显式启动事务，如果执行commit则提交事务。如果执行commit work and chain则提交事务并自动启动下一个事务。 
 
 
 
-###视图
+
+
+
+
+##MVCC-Multiversion Currency Control
+
+
+
+### 一致性视图（consistent read view）
 
 1.innodb支持RC和RR隔离级别实现是用的一致性视图(consistent read view)
 
-2.事务在启动时会拍一个快照,这个快照是基于整个库的.
+2.一致性视图启动时机
+
+(1)如果是RR级别
+
+>  begin/start transaction 命令启动方式，一致性视图/事务是在第执行第一个快照读语句时创建的；
+>
+> start transaction with consistent snapshot 启动方式，一致性视图/事务马上创建。 
+>
+> 默认 autocommit=1，sql 语句本身就是一个事务，语句完成的时候会自动提交 
+
+(2) 在RC读提交隔离级别下，每一个语句执行前都会重新算出一个新的视图 
+
+
+
+###快照
+
+1.事务在启动时会拍一个**快照**,这个快照是基于整个库的.
 基于整个库的意思就是说一个事务内,整个库的修改对于该事务都是不可见的(对于快照读的情况)
 如果在事务内select t表,另外的事务执行了DDL t表,根据发生时间,要嘛锁住要嘛报错(参考第六章)
 
-###MVCC（Multiversion Currency Control）
-
-3.事务是如何实现的MVCC呢?
-(1)每个事务都有一个事务ID,叫做transaction id(严格递增)
-(2)事务在启动时,找到已提交的最大事务ID记为up_limit_id。
-(3)事务在更新一条语句时,比如id=1改为了id=2.会把id=1和该行之前的row trx_id写到undo log里,
+2.事务是如何实现快照的呢?
+(0)每个事务都有一个事务ID,叫做transaction id(严格递增)
+(1)事务在更新一条语句时,比如id=1改为了id=2.会把id=1和该行之前的row trx_id写到undo log里,
 并且在数据页上把id的值改为2,并且把修改这条语句的transaction id记在该行行头
-(4)再定一个规矩,一个事务要查看一条数据时,必须先用该事务的up_limit_id与该行的transaction id做比对,
+
+<img src="MySQL.assets/image-20191127215023372.png" alt="image-20191127215023372" style="zoom: 67%;" />
+
+> V1、V2、V3 并不是物理上真实存在的，而是每次需要的时候根据当前版本和 undo log 计算出来的
+
+(2)InnoDB 为每个事务构造了一个数组，用来保存这个事务启动瞬间，启动了但还没提交所有事务 ID。
+
+(3)数组里面事务 ID 的最小值记为低水位；当前系统里面已经创建过的事务 ID 的最大值加 1记为高水位 
+
+ (4)再定一个规矩,一个事务要查看一条数据时,必须先用该事务的up_limit_id与该行的transaction id做比对,
 如果up_limit_id>=transaction id,那么可以看.如果up_limit_id<transaction id,则只能去undo log里去取。去undo log查找数据的时候,也需要做比对,必须up_limit_id>transaction id,才返回数据
 
-4.什么是当前读,由于当前读都是先读后写,只能读当前的值,所以为当前读.会更新事务内的up_limit_id为该事务的transaction id
+(4) 这个视图数组和高水位，就组成了当前事务的read-view， 数据版本的可见性规则，就是基于数据的 row trx_id 和这个一致性视图的对比结果得到的。
 
-5.为什么rr能实现可重复读而rc不能,分两种情况
+<img src="MySQL.assets/image-20191127222747372.png" alt="image-20191127222747372" style="zoom: 67%;" />
+
+> 如果落在绿色部分，表示这个版本是已提交的事务或者是当前事务自己生成的，这个数据是可见的；
+>
+> 如果落在红色部分，表示这个版本是由将来启动的事务生成的，是肯定不可见的；继续去undo log找
+>
+> 如果落在黄色部分，那就包括两种情况
+>
+> a. 若 row trx_id 在数组中，表示这个版本是由还没提交的事务生成的，不可见；
+>
+> b. 若 row trx_id 不在数组中，表示这个版本是已经提交了的事务生成的，可见。 
+
+ 翻译一下。一个数据版本，对于一个事务视图来说，除了自己的更新总是可见以外，有三种情况： 
+
+> **版本未提交，不可见；**
+>
+> **版本已提交，但是是在视图创建后提交的，不可见；**
+>
+> **版本已提交，而且是在视图创建前提交的，可见。** 
+
+ 
+
+###current read
+
+什么是当前读, 更新数据都是先读后写的，而这个读，只能读当前的值 
+
+ 除了 update 语句外，select 语句如果加锁，也是当前读。
+
+```mysql
+mysql> select k from t where id=1 lock in share mode; 读锁（S 锁，共享锁）
+mysql> select k from t where id=1 for update; 写锁（X 锁，排他锁）
+```
+
+
+
+4.为什么rr能实现可重复读而rc不能,分两种情况
 (1)快照读的情况下,rr不能更新事务内的up_limit_id,
   而rc每次会把up_limit_id更新为快照读之前最新已提交事务的transaction id,则rc不能可重复读
 (2)当前读的情况下,rr是利用record lock+gap lock来实现的,而rc没有gap,所以rc不能可重复读 
@@ -168,6 +237,8 @@ update语句执行流程图
 
 
 ## 索引
+
+###索引基础
 
 0.二叉搜索树：每个节点的左儿子小于父节点，父节点又小于右儿子
 1.二叉搜索树：查询时间复杂度O(log(N))，更新时间复杂度O(log(N))
