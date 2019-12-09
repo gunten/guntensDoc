@@ -160,7 +160,7 @@ update语句执行流程图
 
 (1)如果是RR级别
 
->  begin/start transaction 命令启动方式，一致性视图/事务是在第执行第一个快照读语句时创建的；
+>  begin/start transaction 命令启动方式，一致性视图/事务是在执行第一个快照读语句时创建的；
 >
 > start transaction with consistent snapshot 启动方式，一致性视图/事务马上创建。 
 >
