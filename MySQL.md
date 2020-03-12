@@ -669,3 +669,22 @@ count(*)、count(主键 id)、count(字段) 和 count(1) 等不同用法的性�
 count(*)、count(主键 id) 和 count(1) 都表示返回满足条件的结果集的总行数；而 count(字段），则表示返回满足条件的数据行里面，参数“字段”不为 NULL 的总个数。
 
 结论是：按照效率排序的话，count(字段)<count(主键 id)<count(1)≈count(*)，所以尽量使用 count(*)。
+
+
+
+
+
+## order by 工作原理
+
+通过这一节的阅读学习，知道了一个有Order by语言的排序逻辑和排序对内存的消耗。
+
+老师介绍了4种情况，区分了全字段排序和Rowid排序的区别，如果有足够的内存，用全字段排序，否则用Rowid排序，这样排序的效率会更好。
+
+在上述两种排序的基础之上，讲述了联合索引，联合索引解决了不需要按照姓名进行排序，这样只需要扫描1000次。进一步是覆盖索引，连回到主键取索引都不需要了。
+
+
+
+分页查询，可以用延迟关联来优化：
+select * from t join
+(select id from t where city in('杭州','苏州') order by name limit 10000,100) t_id
+on t.id=t_id.id;
