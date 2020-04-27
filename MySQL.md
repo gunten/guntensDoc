@@ -676,11 +676,66 @@ count(*)、count(主键 id) 和 count(1) 都表示返回满足条件的结果集
 
 ## order by 工作原理
 
-通过这一节的阅读学习，知道了一个有Order by语言的排序逻辑和排序对内存的消耗。
+```mysql
+CREATE TABLE `t` (
+  `id` int(11) NOT NULL,
+  `city` varchar(16) NOT NULL,
+  `name` varchar(16) NOT NULL,
+  `age` int(11) NOT NULL,
+  `addr` varchar(128) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `city` (`city`)
+) ENGINE=InnoDB;
 
-老师介绍了4种情况，区分了全字段排序和Rowid排序的区别，如果有足够的内存，用全字段排序，否则用Rowid排序，这样排序的效率会更好。
+#假设你要查询城市是“杭州”的所有人名字，并且按照姓名排序返回前 1000 个人的姓名、年龄
 
-在上述两种排序的基础之上，讲述了联合索引，联合索引解决了不需要按照姓名进行排序，这样只需要扫描1000次。进一步是覆盖索引，连回到主键取索引都不需要了。
+select city,name,age from t where city='杭州' order by name limit 1000  ;
+
+```
+
+
+
+###全字段排序
+
+我们先来看一下 city 这个索引的示意图
+
+<img src="MySQL.assets/5334cca9118be14bde95ec94b02f0a3e.png" alt="img" style="zoom: 33%;" />
+
+通常情况下，这个语句执行流程如下所示 ：
+
+1.初始化 sort_buffer，确定放入 name、city、age 这三个字段；
+
+2.从索引 city 找到第一个满足 city='杭州’条件的主键 id，也就是图中的 ID_X；
+
+3.到主键 id 索引取出整行，取 name、city、age 三个字段的值，存入 sort_buffer 中；
+
+4.从索引 city 取下一个记录的主键 id；
+
+5.重复步骤 3、4 直到 city 的值不满足查询条件为止，对应的主键 id 也就是图中的 ID_Y；
+
+6.对 sort_buffer 中的数据按照字段 name 做快速排序；
+
+7.按照排序结果取前 1000 行返回给客户端。
+
+我们暂且把这个排序过程，称为全字段排序，执行流程的示意图如下所示
+
+<img src="MySQL.assets/6c821828cddf46670f9d56e126e3e772.jpg" alt="img" style="zoom: 50%;" />
+
+图中“按 name 排序”这个动作，可能在内存中完成，也可能需要使用外部排序，这取决于排序所需的内存和参数 sort_buffer_size。
+
+sort_buffer_size，就是 MySQL 为排序开辟的内存（sort_buffer）的大小。如果要排序的数据量小于 sort_buffer_size，排序就在内存中完成。但如果排序数据量太大，内存放不下，则不得不利用磁盘临时文件辅助排序。
+
+
+
+### rowid 排序
+
+如果 MySQL 认为排序的单行长度太大会怎么做呢？ 我来修改一个参数，让 MySQL 采用另外一种算法。
+
+> SET max_length_for_sort_data = 16;
+
+max_length_for_sort_data，是 MySQL 中专门控制用于排序的行数据的长度的一个参数。它的意思是，如果单行的长度超过这个值，MySQL 就认为单行太大，要换一个算法。新的算法放入 sort_buffer 的字段，只有要排序的列（即 name 字段）和主键 id。
+
+<img src="MySQL.assets/dc92b67721171206a302eb679c83e86d.jpg" alt="img" style="zoom:50%;" />
 
 
 
@@ -688,3 +743,10 @@ count(*)、count(主键 id) 和 count(1) 都表示返回满足条件的结果集
 select * from t join
 (select id from t where city in('杭州','苏州') order by name limit 10000,100) t_id
 on t.id=t_id.id;
+
+
+
+## 如何正确地显示随机消息？
+
+
+
