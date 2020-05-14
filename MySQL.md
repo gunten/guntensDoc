@@ -110,7 +110,7 @@ update语句执行流程图
 
 ###二阶段提交
 
-1 prepare阶段 2 写binlog 3 commit
+1 redolog prepare阶段 2 写binlog 3 commit
 
 当在2之前崩溃时
 
@@ -901,3 +901,104 @@ MySQL 后面的版本可能会改变加锁策略，所以这个规则只限于�
 > 优化 2：索引上的等值查询，向右遍历时且最后一个值不满足等值条件的时候，next-key lock 退化为间隙锁。
 >
 > 一个 bug：唯一索引上的范围查询会访问到不满足条件的第一个值为止。
+
+
+
+
+
+## MySQL是怎么保证数据不丢的？
+
+### binlog 的写入机制
+
+binlog 的写入逻辑比较简单：事务执行过程中，先把日志写到 binlog cache，事务提交的时候，再把 binlog cache 写到 binlog 文件中。
+
+一个事务的 binlog 是不能被拆开的，因此不论这个事务多大，也要确保一次性写入。这就涉及到了 binlog cache 的保存问题。
+
+<img src="MySQL.assets/9ed86644d5f39efb0efec595abb92e3e.png" alt="img" style="zoom: 67%;" />
+
+可以看到，每个线程有自己 binlog cache，参数 binlog_cache_size 用于控制所占内存大小，但是共用同一份 binlog 文件
+
+- 图中的 write，指的就是指把日志写入到文件系统的 page cache，并没有把数据持久化到磁盘，所以速度比较快。
+
+- 图中的 fsync，才是将数据持久化到磁盘的操作。一般情况下，我们认为 fsync 才占磁盘的 IOPS
+
+write 和 fsync 的时机，是由参数 sync_binlog 控制的：
+
+1. sync_binlog=0 的时候，表示每次提交事务都只 write，不 fsync；（默认）
+2. sync_binlog=1 的时候，表示每次提交事务都会执行 fsync；
+3. sync_binlog=N(N>1) 的时候，表示每次提交事务都 write，但累积 N 个事务后才 fsync。(主机重启，丢失最近N个事务的binlog日志)
+
+
+
+### redo log 的写入机制
+
+redo log 可能存在的三种状态
+
+![img](MySQL.assets/9d057f61d3962407f413deebc80526d4.png)
+
+
+
+这三种状态分别是：
+
+1. 存在 redo log buffer 中，物理上是在 MySQL 进程内存中，就是图中的红色部分；
+2. 写到磁盘 (write)，但是没有持久化（fsync)，物理上是在文件系统的 page cache 里面，也就是图中的黄色部分；
+3. 持久化到磁盘，对应的是 hard disk，也就是图中的绿色部分。
+
+为了控制 redo log 的写入策略，InnoDB 提供了 innodb_flush_log_at_trx_commit 参数，
+
+它有三种可能取值：
+
+1. 设置为 0 的时候，表示每次事务提交时都只是把 redo log 留在 redo log buffer 中 ;
+2. 设置为 1 的时候，表示每次事务提交时都将 redo log 直接持久化到磁盘；
+3. 设置为 2 的时候，表示每次事务提交时都只是把 redo log 写到 page cache。
+
+InnoDB 有一个后台线程，每隔 1 秒，就会把 redo log buffer 中的日志，调用 write 写到文件系统的 page cache，然后调用 fsync 持久化到磁盘。
+
+除了后台线程每秒一次的轮询操作外，还有两种场景会让一个没有提交的事务的 redo log 写入到磁盘中。
+
+1. **一种是，redo log buffer 占用的空间即将达到 innodb_log_buffer_size 一半的时候，后台线程会主动write 到page cache。**
+2. **另一种是，并行的事务提交的时候，顺带将这个事务的 redo log buffer 持久化到磁盘。**
+
+
+
+### 组提交机制（group commit）
+
+通常我们说 **MySQL 的“双 1”配置**，指的就是 sync_binlog 和 innodb_flush_log_at_trx_commit 都设置成 1。也就是说，一个事务完整提交前，需要等待两次刷盘，一次是 redo log（prepare 阶段），一次是 binlog。
+
+这时候，你可能有一个疑问，这意味着我从 MySQL 看到的 TPS 是每秒两万的话，每秒就会写四万次磁盘。但是，我用工具测试出来，磁盘能力也就两万左右，怎么能实现两万的 TPS？
+
+解释这个问题，就要用到**组提交（group commit）机制**了。
+
+<img src="MySQL.assets/933fdc052c6339de2aa3bf3f65b188cc.png" alt="img" style="zoom: 50%;" />
+
+
+
+1. trx1 是第一个到达的，会被选为这组的 leader；
+2. 等 trx1 要开始写盘的时候，这个组里面已经有了三个事务，这时候 LSN 也变成了 160；
+3. trx1 去写盘的时候，带的就是 LSN=160，因此等 trx1 返回时，所有 LSN 小于等于 160 的 redo log，都已经被持久化到磁盘；
+4. 这时候 trx2 和 trx3 就可以直接返回了。
+
+在并发更新场景下，第一个事务写完 redo log buffer 以后，接下来这个 fsync 越晚调用，组员可能越多，节约 IOPS 的效果就越好。
+
+为了让一次 fsync 带的组员更多，MySQL 有一个很有趣的优化：拖时间。
+
+<img src="MySQL.assets/5ae7d074c34bc5bd55c82781de670c28.png" alt="img" style="zoom:33%;" />
+
+这么一来，binlog 也可以组提交了。不过通常情况下第 3 步执行得会很快，所以 binlog 的 write 和 fsync 间的间隔时间短，导致能集合到一起持久化的 binlog 比较少，因此 binlog 的组提交的效果通常不如 redo log 的效果那么好。
+
+如果你想提升 binlog 组提交的效果，可以通过设置 binlog_group_commit_sync_delay 和 binlog_group_commit_sync_no_delay_count 来实现。
+
+1. binlog_group_commit_sync_delay 参数，表示延迟多少微秒后才调用fsync;
+2. binlog_group_commit_sync_no_delay_count 参数，表示累积多少次以后才调用 fsync。
+
+这两个条件是或的关系，也就是说只要有一个满足条件就会调用 fsync。
+
+### IO性能瓶颈
+
+如果你的 MySQL 现在出现了性能瓶颈，而且瓶颈在 IO 上，可以通过哪些方法来提升性能呢？
+
+1. 设置 binlog_group_commit_sync_delay 和 binlog_group_commit_sync_no_delay_count 参数，减少 binlog 的写盘次数。这个方法是基于“额外的故意等待”来实现的，因此可能会增加语句的响应时间，但没有丢失数据的风险。
+2. 将 sync_binlog 设置为大于 1 的值（比较常见是 100~1000）。这样做的风险是，主机掉电时会丢 binlog 日志。
+3. 将 innodb_flush_log_at_trx_commit 设置为 2。这样做的风险是，主机掉电的时候会丢数据。
+
+一般情况下，把生产库改成“非双 1”配置，是设置 innodb_flush_log_at_trx_commit=2、sync_binlog=1000
