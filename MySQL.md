@@ -1002,3 +1002,127 @@ InnoDB 有一个后台线程，每隔 1 秒，就会把 redo log buffer 中的�
 3. 将 innodb_flush_log_at_trx_commit 设置为 2。这样做的风险是，主机掉电的时候会丢数据。
 
 一般情况下，把生产库改成“非双 1”配置，是设置 innodb_flush_log_at_trx_commit=2、sync_binlog=1000
+
+
+
+
+
+## MySQL是怎么保证主备一致的？
+
+### MySQL 主备的基本原理
+
+<img src="MySQL.assets/fd75a2b37ae6ca709b7f16fe060c2c10.png" alt="img" style="zoom:33%;" />
+
+在状态 1 中，虽然节点 B 没有被直接访问，但是我依然建议你把节点 B（也就是备库）设置成只读（readonly）模式。这样做，有以下几个考虑：
+
+1. 有时候一些运营类的查询语句会被放到备库上去查，设置为只读可以防止误操作；
+2. 防止切换逻辑有 bug，比如切换过程中出现双写，造成主备不一致；
+3. 可以用 readonly 状态，来判断节点的角色。
+
+
+
+接下来，我们再看看**节点 A 到 B 这条线的内部流程是什么样的**。下图画出的就是一个 update 语句在节点 A 执行，然后同步到节点 B 的完整流程图。
+
+<img src="MySQL.assets/a66c154c1bc51e071dd2cc8c1d6ca6a3.png" alt="img" style="zoom: 50%;" />
+
+主库接收到客户端的更新请求后，执行内部事务的更新逻辑，同时写 binlog。
+
+备库 B 跟主库 A 之间维持了一个长连接。主库 A 内部有一个线程，专门用于服务备库 B 的这个长连接。一个事务日志同步的完整过程是这样的：
+
+1. 在备库 B 上通过 change master 命令，设置主库 A 的 IP、端口、用户名、密码，以及要从哪个位置开始请求 binlog，这个位置包含文件名和日志偏移量。
+2. 在备库 B 上执行 start slave 命令，这时候备库会启动两个线程，就是图中的 io_thread 和 sql_thread。其中 io_thread 负责与主库建立连接。
+3. 主库 A 校验完用户名、密码后，开始按照备库 B 传过来的位置，从本地读取 binlog，发给 B。
+4. 备库 B 拿到 binlog 后，写到本地文件，称为中转日志（relay log）。
+5. sql_thread 读取中转日志，解析出日志里的命令，并执行。
+
+后来由于多线程复制方案的引入，sql_thread 演化成为了多个线程。
+
+
+
+### binlog 的三种格式对比
+
+#### statement 
+
+当 binlog_format=statement 时，binlog 里面记录的就是 SQL 语句的原文。可以用类似命令看 binlog 中的内容。
+
+```mysql
+mysql> show binlog events in 'master.000001';
+```
+
+<img src="MySQL.assets/b9818f73cd7d38a96ddcb75350b52931.png" alt="img"  />
+
+![img](MySQL.assets/96c2be9c0fcbff66883118526b26652b.png)
+
+>运行这条 delete 命令产生了一个 warning。这是因为 delete 带 limit，很可能会出现主备数据不一致的情况。
+>
+>如果主库、备库走的是不同的索引，有可能出现不一致
+
+
+
+#### row
+
+先来看看这时候 binog 中的内容吧
+
+<img src="MySQL.assets/d67a38db154afff610ae3bb64e266826.png" alt="img" style="zoom: 33%;" />
+
+与 statement 格式的 binlog 相比，前后的 BEGIN 和 COMMIT 是一样的。但是，row 格式的 binlog 里没有了 SQL 语句的原文，而是替换成了两个 event：Table_map 和 Delete_rows。
+
+1. Table_map event，用于说明接下来要操作的表是 test 库的表 t;
+2. Delete_rows event，用于定义删除的行为。
+
+其实，我们通过图 是看不到详细信息的，还需要借助 mysqlbinlog 工具，用下面这个命令解析和查看 binlog 中的内容。因为图 中的信息显示，这个事务的 binlog 是从 8900 这个位置开始的，所以可以用 start-position 参数来指定从这个位置的日志开始解析。
+
+>mysqlbinlog  -vv data/master.000001 --start-position=8900;
+
+![img](MySQL.assets/c342cf480d23b05d30a294b114cebfc2.png)
+
+- server id 1，表示这个事务是在 server_id=1 的这个库上执行的。
+- 每个 event 都有 CRC32 的值，这是因为我把参数 binlog_checksum 设置成了 CRC32。
+- Table_map event 跟在图 5 中看到的相同，显示了接下来要打开的表，map 到数字 226。现在我们这条 SQL 语句只操作了一张表，如果要操作多张表呢？每个表都有一个对应的 Table_map event、都会 map 到一个单独的数字，用于区分对不同表的操作。
+- 我们在 mysqlbinlog 的命令中，使用了 -vv 参数是为了把内容都解析出来，所以从结果里面可以看到各个字段的值（比如，@1=4、 @2=4 这些值）。
+- binlog_row_image 的默认配置是 FULL，因此 Delete_event 里面，包含了删掉的行的所有字段的值。如果把 binlog_row_image 设置为 MINIMAL，则只会记录必要的信息，在这个例子里，就是只会记录 id=4 这个信息。
+- 最后的 Xid event，用于表示事务被正确地提交了。
+
+你可以看到，当 binlog_format 使用 row 格式的时候，binlog 里面记录了真实删除行的主键 id，这样 binlog 传到备库去的时候，就肯定会删除 id=4 的行，不会有主备删除不同行的问题。
+
+现在越来越多的场景要求把 MySQL 的 binlog 格式设置成 row。这么做的理由有很多，我来给你举一个可以直接看出来的好处：**恢复数据。**
+
+因为row格式binlog会把执行参数保存起来，恢复时候只要反过来执行即可。
+
+
+
+#### mixed
+
+**为什么会有 mixed 这种 binlog 格式的存在场景？**推论过程是这样的：
+
+- 因为有些 statement 格式的 binlog 可能会导致主备不一致，所以要使用 row 格式。
+- 但 row 格式的缺点是，很占空间。比如你用一个 delete 语句删掉 10 万行数据，用 statement 的话就是一个 SQL 语句被记录到 binlog 中，占用几十个字节的空间。但如果用 row 格式的 binlog，就要把这 10 万条记录都写到 binlog 中。这样做，不仅会占用更大的空间，同时写 binlog 也要耗费 IO 资源，影响执行速度。
+- 所以，MySQL 就取了个折中方案，也就是有了 mixed 格式的 binlog。mixed 格式的意思是，MySQL 自己会判断这条 SQL 语句是否可能引起主备不一致，如果有可能，就用 row 格式，否则就用 statement 格式。
+
+也就是说，mixed 格式可以利用 statment 格式的优点，同时又避免了数据不一致的风险。
+
+
+
+### 循环复制问题
+
+生产上使用比较多的是双 M 结构
+
+<img src="MySQL.assets/20ad4e163115198dc6cf372d5116c956.png" alt="img" style="zoom:33%;" />
+
+双 M 结构和 M-S 结构，其实区别只是多了一条线，即：节点 A 和 B 之间总是互为主备关系。**这样在切换的时候就不用再修改主备关系。**
+
+但是，双 M 结构还有一个问题需要解决。如果节点 A 同时是节点 B 的备库，相当于又把节点 B 新生成的 binlog 拿过来执行了一次，然后节点 A 和 B 间，会不断地循环执行这个更新语句，也就是循环复制了。这个要怎么解决呢？
+
+
+
+从上面的图中可以看到，MySQL 在 binlog 中记录了这个命令第一次执行时所在实例的 server id。因此，我们可以用下面的逻辑，来解决两个节点间的循环复制的问题：
+
+1. 规定两个库的 server id 必须不同，如果相同，则它们之间不能设定为主备关系；
+2. 一个备库接到 binlog 并在重放的过程中，生成与原 binlog 的 server id 相同的新的 binlog；
+3. 每个库在收到从自己的主库发过来的日志后，先判断 server id，如果跟自己的相同，表示这个日志是自己生成的，就直接丢弃这个日志。
+
+按照这个逻辑，如果我们设置了双 M 结构，日志的执行流就会变成这样：
+
+1. 从节点 A 更新的事务，binlog 里面记的都是 A 的 server id；
+2. 传到节点 B 执行一次以后，节点 B 生成的 binlog 的 server id 也是 A 的 server id；
+3. 再传回给节点 A，A 判断到这个 server id 与自己的相同，就不会再处理这个日志。所以，死循环在这里就断掉了。
