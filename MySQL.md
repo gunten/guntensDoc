@@ -1,4 +1,4 @@
-# MySQL实战
+# `MySQL实战
 
 ## 概览
 
@@ -1232,3 +1232,145 @@ TODO
 虽然随着中转日志的继续应用，这些数据会恢复回来，但是对于一些业务来说，查询到“暂时丢失数据的状态”也是不能被接受的。
 
 因此，**MySQL 高可用系统的可用性，是依赖于主备延迟的。**延迟的时间越小，在主库故障的时候，服务恢复需要的时间就越短，可用性就越高。
+
+
+
+## 一主多从下的主备切换
+
+<img src="MySQL.assets/aadb3b956d1ffc13ac46515a7d619e79.png" alt="img" style="zoom: 50%;" />
+
+虚线箭头表示的是主备关系，也就是 A 和 A’互为主备， 从库 B、C、D 指向的是主库 A。一主多从的设置，一般用于读写分离，主库负责所有的写入和一部分读，其他的读请求则由从库分担。
+
+
+
+<img src="MySQL.assets/0014f97423bd75235a9187f492fb2453.png" alt="img" style="zoom:50%;" />
+
+接下来，我们再一起看看一个切换系统会怎么完成一主多从的主备切换过程。
+
+### 基于位点的主备切换
+
+当我们把节点 B 设置成节点 A’的从库的时候，需要执行一条 change master 命令：
+
+```shell
+CHANGE MASTER TO 
+MASTER_HOST=$host_name 
+MASTER_PORT=$port 
+MASTER_USER=$user_name 
+MASTER_PASSWORD=$password 
+MASTER_LOG_FILE=$master_log_name 
+MASTER_LOG_POS=$master_log_pos  
+```
+
+最后两个参数 MASTER_LOG_FILE 和 MASTER_LOG_POS 表示，要从主库的 master_log_name 文件的 master_log_pos 这个位置的日志继续同步。而这个位置就是我们所说的同步位点，也就是主库对应的文件名和日志偏移量。
+
+这个位点很难精确取到，只能取一个大概位置。为什么这么说呢？
+
+考虑到切换过程中不能丢数据，所以我们找位点的时候，总是要找一个“稍微往前”的，然后再通过判断跳过那些在从库 B 上已经执行过的事务。
+
+一种取同步位点的方法是这样的：
+
+1. 等待新主库 A’把中转日志（relay log）全部同步完成；
+2. 在 A’上执行 show master status 命令，得到当前 A’上最新的 File 和 Position；
+3. 取原主库 A 故障的时刻 T；
+4. 用 mysqlbinlog 工具解析 A’的 File，得到 T 时刻的位点。
+
+> mysqlbinlog File --stop-datetime=T --start-datetime=T
+
+![img](MySQL.assets/3471dfe4aebcccfaec0523a08cdd0ddd.png)
+
+图中，end_log_pos 后面的值“123”，表示的就是 A’这个实例，在 T 时刻写入新的 binlog 的位置。然后，我们就可以把 123 这个值作为 $master_log_pos ，用在节点 B 的 change master 命令里。
+
+
+
+当然这个值并不精确。你可以设想有这么一种情况，假设在 T 这个时刻，主库 A 已经执行完成了一个 insert 语句插入了一行数据 R，并且已经将 binlog 传给了 A’和 B，然后在传完的瞬间主库 A 的主机就掉电了。那么，这时候系统的状态是这样的：
+
+1. 在从库 B 上，由于同步了 binlog， R 这一行已经存在；
+2. 在新主库 A’上， R 这一行也已经存在，日志是写在 123 这个位置之后的；
+3. 我们在从库 B 上执行 change master 命令，指向 A’的 File 文件的 123 位置，就会把插入 R 这一行数据的 binlog 又同步到从库 B 去执行。
+
+这时候，从库 B 的同步线程就会报告 Duplicate entry ‘id_of_R’ for key ‘PRIMARY’ 错误，提示出现了主键冲突，然后停止同步。
+
+**通常情况下，我们在切换任务的时候，要先主动跳过这些错误，有两种常用的方法。**
+
+**一种做法是，主动跳过一个事务。**跳过命令的写法是：
+
+```
+set global sql_slave_skip_counter=1;
+start slave;
+```
+
+**另外一种方式是，通过设置 slave_skip_errors 参数，直接设置跳过指定的错误。**
+
+等到主备间的同步关系建立完成，并稳定执行一段时间之后，我们还需要把这个参数设置为空，以免之后真的出现了主从数据不一致，也跳过了。
+
+
+
+### GTID
+
+上述两种操作都很复杂，而且容易出错。所以，MySQL 5.6 版本引入了 GTID，彻底解决了这个困难。
+
+GTID 的全称是 Global Transaction Identifier，也就是全局事务 ID，是一个事务在提交的时候生成的，是这个事务的唯一标识。它由两部分组成，格式是：
+
+>GTID=server_uuid:gno
+
+- server_uuid 是一个实例第一次启动时自动生成的，是一个全局唯一的值；
+- gno 是一个整数，初始值是 1，每次提交事务的时候分配给这个事务，并加 1
+
+GTID 模式的启动也很简单，我们只需要在启动一个 MySQL 实例的时候，加上参数 gtid_mode=on 和 enforce_gtid_consistency=on 就可以了。
+
+每个 MySQL 实例都维护了一个 GTID 集合，用来对应“这个实例执行过的所有事务”。接下来我就用一个简单的例子，来和你说明 GTID 的基本用法。
+
+```mysql
+CREATE TABLE `t` (
+  `id` int(11) NOT NULL,
+  `c` int(11) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+
+insert into t values(1,1);
+```
+
+<img src="MySQL.assets/28a5cab0079fb12fd5abecd92b3324c2.png" alt="img" style="zoom:67%;" />
+
+可以看到，事务的 BEGIN 之前有一条 SET @@SESSION.GTID_NEXT 命令。这时，如果实例 X 有从库，那么将 CREATE TABLE 和 insert 语句的 binlog 同步过去执行的话，执行事务之前就会先执行这两个 SET 命令， 这样被加入从库的 GTID 集合的，就是图中的这两个 GTID。
+
+假设，现在这个实例 X 是另外一个实例 Y 的从库，并且此时在实例 Y 上执行了下面这条插入语句：
+
+insert into t values(1,1);
+
+并且，这条语句在实例 Y 上的 GTID 是 “aaaaaaaa-cccc-dddd-eeee-ffffffffffff:10”。
+
+那么，实例 X 作为 Y 的从库，就要同步这个事务过来执行，显然会出现主键冲突，导致实例 X 的同步线程停止。这时，我们应该怎么处理呢？
+
+处理方法就是，你可以执行下面的这个语句序列：
+
+```mysql
+set gtid_next='aaaaaaaa-cccc-dddd-eeee-ffffffffffff:10';
+begin;
+commit;
+set gtid_next=automatic;
+start slave;
+```
+
+执行完这个空事务之后的 show master status 的结果
+
+<img src="MySQL.assets/c8d3299ece7d583a3ecd1557851ed157.png" alt="img" style="zoom: 67%;" />
+
+在上面的这个语句序列中，start slave 命令之前还有一句 set gtid_next=automatic。这句话的作用是“恢复 GTID 的默认分配行为”，也就是说如果之后有新的事务再执行，就还是按照原来的分配方式，继续分配 gno=3。
+
+
+
+### 基于 GTID 的主备切换
+
+在 GTID 模式下，备库 B 要设置为新主库 A’的从库的语法如下：
+
+```mysql
+CHANGE MASTER TO 
+MASTER_HOST=$host_name 
+MASTER_PORT=$port 
+MASTER_USER=$user_name 
+MASTER_PASSWORD=$password 
+master_auto_position=1 
+```
+
+其中，master_auto_position=1 就表示这个主备关系使用的是 GTID 协议。可以看到，前面让我们头疼不已的 MASTER_LOG_FILE 和 MASTER_LOG_POS 参数，已经不需要指定了。
