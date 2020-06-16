@@ -1729,3 +1729,41 @@ mysql> select event_name,MAX_TIMER_WAIT  FROM performance_schema.file_summary_by
 >mysql> truncate table performance_schema.file_summary_by_event_name;
 
 把之前的统计信息清空。这样如果后面的监控中，再次出现这个异常，就可以加入监控累积值了。
+
+
+
+## 关于kill 命令
+
+在 MySQL 中有两个 kill 命令：一个是 kill query + 线程 id，表示终止这个线程中正在执行的语句；一个是 kill connection + 线程 id，这里 connection 可缺省，表示断开这个线程的连接，
+
+大多数情况下，kill query/connection 命令是有效的。比如，执行一个查询的过程中，发现执行时间太久，要放弃继续查询，这时我们就可以用 kill query 命令，终止这条查询语句。
+
+还有一种情况是，语句处于锁等待的时候，直接使用 kill 命令也是有效的。我们一起来看下这个例子：
+
+<img src="MySQL.assets/17f88dc70c3fbe06a7738a0ac01db4d0.png" alt="img" style="zoom: 67%;" />
+
+可以看到，session C 执行 kill query 以后，session B 几乎同时就提示了语句被中断。这，就是我们预期的结果。
+
+
+
+### 收到 kill 以后，线程做什么？
+
+前面讲过，当对一个表做增删改查操作时，会在表上加 MDL 读锁。所以，session B 虽然处于 blocked 状态，但还是拿着一个 MDL 读锁的。如果线程被 kill 的时候，就直接终止，那之后这个 MDL 读锁就没机会被释放了。
+
+这样看来，kill 并不是马上停止的意思，而是告诉执行线程说，这条语句已经不需要继续执行了，可以开始“执行停止的逻辑了”。
+
+**实现上，当用户执行 kill query thread_id_B 时，MySQL 里处理 kill 命令的线程做了两件事：**
+
+1. **把 session B 的运行状态改成 THD::KILL_QUERY(将变量 killed 赋值为 THD::KILL_QUERY)；**
+2. **给 session B 的执行线程发一个信号。**
+
+因为像图 1 的我们例子里面，session B 处于锁等待状态，如果只是把 session B 的线程状态设置 THD::KILL_QUERY，线程 B 并不知道这个状态变化，还是会继续等待。发一个信号的目的，就是让 session B 退出等待，来处理这个 THD::KILL_QUERY 状态。
+
+上面的分析中，隐含了这么三层意思：
+
+1. **一个语句执行过程中有多处“埋点”，在这些“埋点”的地方判断线程状态，如果发现线程状态是 THD::KILL_QUERY，才开始进入语句终止逻辑；**
+2. **如果处于等待状态，必须是一个可以被唤醒的等待，否则根本不会执行到“埋点”处；**
+3. **语句从开始进入终止逻辑，到终止逻辑完全完成，是有一个过程的。**
+
+
+
