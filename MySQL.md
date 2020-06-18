@@ -1849,3 +1849,126 @@ mysql> select event_name,MAX_TIMER_WAIT  FROM performance_schema.file_summary_by
 3. 再继续扫描后续的数据，之前的这个数据页之后也不会再被访问到，于是始终没有机会移到链表头部（也就是 young 区域），很快就会被淘汰出去。
 
 可以看到，这个策略最大的收益，就是在扫描这个大表的过程中，虽然也用到了 Buffer Pool，但是对 young 区域完全没有影响，从而保证了 Buffer Pool 响应正常业务的查询命中率。
+
+
+
+
+
+## join 语句的执行过程
+
+```mysql
+CREATE TABLE `t2` (
+  `id` int(11) NOT NULL,
+  `a` int(11) DEFAULT NULL,
+  `b` int(11) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `a` (`a`)
+) ENGINE=InnoDB;
+
+drop procedure idata;
+delimiter ;;
+create procedure idata()
+begin
+  declare i int;
+  set i=1;
+  while(i<=1000)do
+    insert into t2 values(i, i, i);
+    set i=i+1;
+  end while;
+end;;
+delimiter ;
+call idata();
+
+create table t1 like t2;
+insert into t1 (select * from t2 where id<=100)
+```
+
+存储过程 idata() 往表 t2 里插入了 1000 行数据，在表 t1 里插入的是 100 行数据。
+
+
+
+### Index Nested-Loop Join
+
+我们来看一下这个语句：
+
+> select * from t1 straight_join t2 on (t1.a=t2.a);
+
+<img src="MySQL.assets/4b9cb0e0b83618e01c9bfde44a0ea990.png" alt="img" style="zoom: 67%;" />
+
+
+
+这个过程是先遍历表 t1，然后根据从表 t1 中取出的每行数据中的 a 值，去表 t2 中查找满足条件的记录。在形式上，这个过程就跟我们写程序时的嵌套查询类似，并且可以用上被驱动表的索引，所以我们称之为“Index Nested-Loop Join”，简称 NLJ。
+
+<img src="MySQL.assets/d83ad1cbd6118603be795b26d38f8df6.jpg" alt="img" style="zoom: 67%;" />
+
+假设被驱动表的行数是 M。每次在被驱动表查一行数据，要先搜索索引 a，再搜索主键索引。每次搜索一棵树近似复杂度是以 2 为底的 M 的对数，记为 log2M，所以在被驱动表上查一行的时间复杂度是 2*log2M。
+
+假设驱动表的行数是 N，整个执行过程，近似复杂度是 N + N * 2 * log2M。
+
+
+
+### Simple Nested-Loop Join
+
+现在，我们把 SQL 语句改成不走索引：
+
+```mysql
+select * from t1 straight_join t2 on (t1.a=t2.b);
+```
+
+由于表 t2 的字段 b 上没有索引，因此再用图 2 的执行流程时，每次到 t2 去匹配的时候，就要做一次全表扫描。
+
+这个算法也有一个名字，叫做“Simple Nested-Loop Join”，但是这算法太“笨重”了，MySQL也没有使用SNLJ。
+
+
+
+### Block Nested-Loop Join
+
+join_buffer 的大小是由参数 join_buffer_size 设定的，默认值是 256k。如果放不下表 t1 的所有数据话，策略很简单，就是分段放。我把 join_buffer_size 改成 1200，再执行：
+
+1. 扫描表 t1，顺序读取数据行放入线程内存 join_buffer 中，放完第 88 行 join_buffer 满了，继续第 2 步；
+
+2. 扫描表 t2，把 t2 中的每一行取出来，跟 join_buffer 中的数据做对比，满足 join 条件的，作为结果集的一部分返回；
+
+   因为对比是在内存中操作，速度会比Simple Nested-Loop Join 快很多
+
+3. 清空 join_buffer；
+
+4. 继续扫描表 t1，顺序读取最后的 12 行数据放入 join_buffer 中，继续执行第 2 步。
+
+执行流程图也就变成这样：
+
+<img src="MySQL.assets/695adf810fcdb07e393467bcfd2f6ac4.jpg" alt="img" style="zoom:67%;" />
+
+
+
+这个流程才体现出了这个算法名字中“Block”的由来，表示“分块去 join”。
+
+假设，驱动表的数据行数是 N，需要分 λ*N段才能完成算法流程，显然λ的取值范围是 (0,1)。被驱动表的数据行数是 M。
+
+在这个算法的执行过程中：
+
+1. 扫描行数是 N+λ * N * M；
+2. 内存判断 N*M 次
+
+N数越大，分段数越大。N固定的时候，join_buffer_size 越大，λ 越小，对被驱动表的全表扫描次数就越少。这就是为什么，**你可能会看到一些建议告诉你，如果你的 join 语句很慢，就把 join_buffer_size 改大。**
+
+
+
+第一个问题：能不能使用 join 语句？
+
+1. 如果可以使用 Index Nested-Loop Join 算法，也就是说可以用上被驱动表上的索引，其实是没问题的；
+2. 如果使用 Block Nested-Loop Join 算法，扫描行数就会过多。尤其是在大表上的 join 操作，这样可能要扫描被驱动表很多次，会占用大量的系统资源。所以这种 join 尽量不要用。
+
+所以你在判断要不要使用 join 语句时，就是看 explain 结果里面，Extra 字段里面有没有出现“Block Nested Loop”字样。
+
+
+
+第二个问题是：如果要使用 join，应该选择大表做驱动表还是选择小表做驱动表？
+
+1. 如果是 Index Nested-Loop Join 算法，应该选择小表做驱动表；
+2. 如果是 Block Nested-Loop Join 算法：
+
+- 在 join_buffer_size 足够大的时候，是一样的，即λ * N = 1；
+- 在 join_buffer_size 不够大的时候（这种情况更常见），应该选择小表做驱动表。
+
+结论就是，总是应该使用小表做驱动表。
