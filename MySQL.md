@@ -2044,6 +2044,10 @@ NLJ算法每次从驱动表t1取一条数据去t2 join，我们把取数批量�
 
 > set optimizer_switch='mrr=on,mrr_cost_based=off,batched_key_access=on';
 
+**当多表join时，使用 BKA 算法的时候，并不是“先计算两个表 join 的结果，再跟第三个表 join”，而是直接嵌套查询的。**
+
+
+
 
 
 ### BNL的优化
@@ -2097,3 +2101,128 @@ select * from t1 join temp_t on (t1.b=temp_t.b);
 ```
 
 总体来看，不论是在原表上加索引，还是用有索引的临时表，我们的思路都是让 join 语句能够用上被驱动表上的索引，来触发 BKA 算法，提升查询性能。
+
+
+
+
+
+## 为什么用户临时表可以重名？
+
+在上一篇文章中，我们在优化 join 查询的时候使用到了临时表。
+
+这里，我需要先帮你厘清一个容易误解的问题：有的人可能会认为，临时表就是内存表。但是，这两个概念可是完全不同的。
+
+- 内存表，指的是使用 Memory 引擎的表，建表语法是 create table … engine=memory。这种表的数据都保存在内存里，系统重启的时候会被清空，但是表结构还在。除了这两个特性看上去比较“奇怪”外，从其他的特征上看，它就是一个正常的表。
+- 而临时表，可以使用各种引擎类型 。如果是使用 InnoDB 引擎或者 MyISAM 引擎的临时表，写数据的时候是写到磁盘上的。当然，临时表也可以使用 Memory 引擎。弄清楚了内存表和临时表的区别以后，我们再来看看临时表有哪些特征。
+
+
+
+### 临时表的特性
+
+<img src="MySQL.assets/3cbb2843ef9a84ee582330fb1bd0d6e3.png" alt="img" style="zoom: 67%;" />
+
+可以看到，临时表在使用上有以下几个特点：
+
+1. 建表语法是 create temporary table …。
+2. 一个临时表只能被创建它的 session 访问，对其他线程不可见。在这个 session 结束的时候，会自动删除临时表。
+3. 临时表可以与普通表同名。
+4. session A 内有同名的临时表和普通表的时候，show create 语句，以及增删改查语句访问的是临时表。
+5. show tables 命令不显示临时表。
+
+
+
+### 分库分表中临时表的应用
+
+一般分库分表的场景，就是要把一个逻辑上的大表分散到不同的数据库实例上。比如。将一个大表 ht，按照字段 f，拆分成 1024 个分表，然后分布到 32 个数据库实例上。如下图所示：
+
+<img src="MySQL.assets/ddb9c43526dfd9b9a3e6f8c153478181.jpg" alt="img" style="zoom: 50%;" />
+
+一般情况下，这种分库分表系统都有一个中间层 proxy。不过，也有一些方案会让客户端直接连接数据库，也就是没有 proxy 这一层。
+
+在这个架构中，分区 key 的选择是以“减少跨库和跨表查询”为依据的。如果大部分的语句都会包含 f 的等值条件，那么就要用 f 做分区键。这样，在 proxy 这一层解析完 SQL 语句以后，就能确定将这条语句路由到哪个分表做查询。比如：
+
+```mysql
+select v from ht where f=N;
+```
+
+我们就可以通过分表规则（比如，N%1024) 来确认需要的数据被放在了哪个分表上。这种语句只需要访问一个分表，是分库分表方案最欢迎的语句形式了。
+
+但是，如果这个表上还有另外一个索引 k，并且查询语句是这样的：
+
+```mysql
+select v from ht where k >= M order by t_modified desc limit 100;
+```
+
+这时候，由于查询条件里面没有用到分区字段 f，只能到所有的分区中去查找满足条件的所有行，然后统一做 order by 的操作。这种情况下，有两种比较常用的思路。
+
+**第一种思路是，在 proxy 层的进程代码中实现排序。**
+
+这种方式的优势是处理速度快，拿到分库的数据以后，直接在内存中参与计算。不过，这个方案的缺点也比较明显：
+
+1. 需要的开发工作量比较大。我们举例的这条语句还算是比较简单的，如果涉及到复杂的操作，比如 group by，甚至 join 这样的操作，对中间层的开发能力要求比较高；
+2. 对 proxy 端的压力比较大，尤其是很容易出现内存不够用和 CPU 瓶颈的问题。
+
+**另一种思路就是，把各个分库拿到的数据，汇总到一个 MySQL 实例的一个表中，然后在这个汇总实例上做逻辑操作。**
+
+- 在汇总库上创建一个临时表 temp_ht，表里包含三个字段 v、k、t_modified；
+- 在各个分库上执行
+
+> select v,k,t_modified from ht_x where k >= M order by t_modified desc limit 100;
+
+- 把分库执行的结果插入到 temp_ht 表中；
+- 执行
+
+> select v from temp_ht order by t_modified desc limit 100;
+
+<img src="MySQL.assets/f5ebe0f5af37deeb4d0b63d6fb11fc0d.jpg" alt="img" style="zoom: 67%;" />
+
+
+
+### 为什么临时表可以重名？
+
+####表结构、表数据
+
+创建临时表的时候，MySQL 要给这个 InnoDB 表创建一个 frm 文件保存表结构定义，还要有地方保存表数据。
+
+这个 frm 文件放在临时文件目录下，可以使用 select @@tmpdir 命令，来显示实例的临时文件目录。
+
+**文件名 = #sql{进程 id}_ {线程 id}_ 序列号.frm**
+
+
+
+而关于表中数据的存放方式，在不同的 MySQL 版本中有着不同的处理方式：
+
+- 在 5.6 以及之前的版本里，MySQL 会在临时文件目录下创建一个相同前缀、以.ibd 为后缀的文件，用来存放数据文件；
+- 而从 5.7 版本开始，MySQL 引入了一个临时文件表空间，专门用来存放临时文件的数据。因此，我们就不需要再创建 ibd 文件了。
+
+
+
+####内存中
+
+MySQL 维护数据表，除了物理上要有文件外，内存里面也有一套机制区别不同的表，每个表都对应一个 table_def_key。
+
+- 一个普通表的 table_def_key 的值是由“库名 + 表名”得到的，所以如果你要在同一个库下创建两个同名的普通表，创建第二个表的过程中就会发现 table_def_key 已经存在了。
+- 而对于临时表，table_def_key 在“库名 + 表名”基础上，又加入了“server_id+thread_id”。
+
+
+
+也就是说，session A 和 sessionB 创建的两个临时表 t1，它们的 table_def_key 不同，磁盘文件名也不同，因此可以并存。
+
+在实现上，每个线程都维护了自己的临时表链表。这样每次 session 内操作表的时候，先遍历链表，检查是否有这个名字的临时表，如果有就优先操作临时表，如果没有再操作普通表；在 session 结束的时候，对链表里的每个临时表，执行 “DROP TEMPORARY TABLE + 表名”操作。
+
+这时候你会发现，binlog 中也记录了 DROP TEMPORARY TABLE 这条命令。你一定会觉得奇怪，临时表只在线程内自己可以访问，为什么需要写到 binlog 里面？
+
+### 临时表和主备复制
+
+你可以设想一下，在主库上执行下面这个语句序列：
+
+```mysql
+create table t_normal(id int primary key, c int)engine=innodb;/*Q1*/
+create temporary table temp_t like t_normal;/*Q2*/
+insert into temp_t values(1,1);/*Q3*/
+insert into t_normal select * from temp_t;/*Q4*/
+```
+
+如果关于临时表的操作都不记录，备库在执行到Q4 的时候，就会报错“表 temp_t 不存在”。
+
+如果当前的 binlog_format=row，那么跟临时表有关的语句，就不会记录到 binlog 里。也就是说，**只在 binlog_format=statment/mixed 的时候，binlog 中才会记录临时表的操作。**
