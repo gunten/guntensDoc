@@ -798,7 +798,9 @@ call idata();
 
 4.初始化 sort_buffer。sort_buffer 中有两个字段，一个是 double 类型，另一个是整型。
 
-5.从内存临时表中一行一行地取出 R 值和引擎生成的row_id，分别存入 sort_buffer 中的两个字段里。这个过程要对内存临时表做全表扫描，此时扫描行数增加 10000，变成了 20000。6.在 sort_buffer 中根据 R 的值进行排序。注意，这个过程没有涉及到表操作，所以不会增加扫描行数。
+5.从内存临时表中一行一行地取出 R 值和引擎生成的row_id，分别存入 sort_buffer 中的两个字段里。这个过程要对内存临时表做全表扫描，此时扫描行数增加 10000，变成了 20000。
+
+6.在 sort_buffer 中根据 R 的值进行排序。注意，这个过程没有涉及到表操作，所以不会增加扫描行数。
 
 7.排序完成后，取出前三个结果的位置信息，依次到内存临时表中取出 word 值，返回给客户端。这个过程中，访问了表的三行数据，总扫描行数变成了 20003。
 ```
@@ -2104,6 +2106,8 @@ select * from t1 join temp_t on (t1.b=temp_t.b);
 
 
 
+------
+
 
 
 ## 为什么用户临时表可以重名？
@@ -2226,3 +2230,266 @@ insert into t_normal select * from temp_t;/*Q4*/
 如果关于临时表的操作都不记录，备库在执行到Q4 的时候，就会报错“表 temp_t 不存在”。
 
 如果当前的 binlog_format=row，那么跟临时表有关的语句，就不会记录到 binlog 里。也就是说，**只在 binlog_format=statment/mixed 的时候，binlog 中才会记录临时表的操作。**
+
+------
+
+
+
+## 什么时候会使用内部临时表？
+
+介绍了 sort buffer、内存临时表和 join buffer。这三个数据结构都是用来存放语句执行过程中的中间数据，以辅助 SQL 语句的执行的。其中，我们在排序的时候用到了 sort buffer，在使用 join 语句的时候用到了 join buffer。
+
+那什么时候会使用内部临时表呢？
+
+
+
+### union 执行流程
+
+```mysql
+
+create table t1(id int primary key, a int, b int, index(a));
+delimiter ;;
+create procedure idata()
+begin
+  declare i int;
+
+  set i=1;
+  while(i<=1000)do
+    insert into t1 values(i, i, i);
+    set i=i+1;
+  end while;
+end;;
+delimiter ;
+call idata();
+```
+
+然后，我们执行下面这条语句：
+
+```mysql
+(select 1000 as f) union (select id from t1 order by id desc limit 2);
+```
+
+<img src="MySQL.assets/402cbdef84eef8f1b42201c6ec4bad4e.png" alt="img" style="zoom: 50%;" />
+
+可以看到：
+
+- 第二行的 key=PRIMARY，说明第二个子句用到了索引 id。
+- 第三行的 Extra 字段，表示在对子查询的结果集做 union 的时候，使用了临时表 (Using temporary)。
+
+这个语句的执行流程是这样的：
+
+1. 创建一个内存临时表，这个临时表只有一个整型字段 f，并且 f 是主键字段。
+2. 执行第一个子查询，得到 1000 这个值，并存入临时表中。
+3. 执行第二个子查询：
+4. - 拿到第一行 id=1000，试图插入临时表中。但由于 1000 这个值已经存在于临时表了，违反了唯一性约束，所以插入失败，然后继续执行；
+   - 取到第二行 id=999，插入临时表成功。
+5. 从临时表中按行取出数据，返回结果，并删除临时表，结果中包含两行数据分别是 1000 和 999。
+
+<img src="MySQL.assets/5d038c1366d375cc997005a5d65c600e.jpg" alt="img" style="zoom:50%;" />
+
+如果把上面这个语句中的 union 改成 union all 的话，就没有了“去重”的语义。这样执行的时候，就依次执行子查询，得到的结果直接作为结果集的一部分，发给客户端。因此也就不需要临时表了。
+
+<img src="MySQL.assets/c1e90d1d7417b484d566b95720fe3f6d.png" alt="img" style="zoom:50%;" />
+
+
+
+### group by 执行流程
+
+我们来看一下这个语句：
+
+```mysql
+select id%10 as m, count(*) as c from t1 group by m;
+```
+
+<img src="MySQL.assets/3d1cb94589b6b3c4bb57b0bdfa385d98.png" alt="img" style="zoom: 50%;" />
+
+这个语句的执行流程是这样的：
+
+1. 创建内存临时表，表里有两个字段 m 和 c，主键是 m；
+2. 扫描表 t1 的索引 a，依次取出叶子节点上的 id 值，计算 id%10 的结果，记为 x；
+3. - 如果临时表中没有主键为 x 的行，就插入一个记录 (x,1);
+   - 如果表中有主键为 x 的行，就将 x 这一行的 c 值加 1；
+4. 遍历完成后，再根据字段 m 做排序，得到结果集返回给客户端。
+
+<img src="MySQL.assets/0399382169faf50fc1b354099af71954.jpg" alt="img" style="zoom: 50%;" />
+
+如果你的需求并不需要对结果进行排序，那你可以在 SQL 语句末尾增加 order by null，也就是改成：
+
+> select id%10 as m, count(*) as c from t1 group by m order by null;
+
+这个例子里由于临时表只有 10 行，内存可以放得下，因此全程只使用了内存临时表。但是，内存临时表的大小是有限制的，参数 tmp_table_size 就是控制这个内存大小的，默认是 16M。如果执行：
+
+```mysql
+set tmp_table_size=1024;
+select id%100 as m, count(*) as c from t1 group by m order by null limit 10;
+```
+
+那么，这时候就会把内存临时表转成磁盘临时表，磁盘临时表默认使用的引擎是 InnoDB。
+
+
+
+### group by 优化方法 
+
+#### 索引
+
+要解决 group by 语句的优化问题，你可以先想一下这个问题：执行 group by 语句为什么需要临时表？
+
+group by 的语义逻辑，是统计不同的值出现的个数。但是，由于每一行的 id%100 的结果是无序的，所以我们就需要有一个临时表，来记录并统计结果。
+
+假设，现在有一个类似图 10 的这么一个数据结构，我们来看看 group by 可以怎么做。
+
+<img src="MySQL.assets/5c4a581c324c1f6702f9a2c70acddd19.jpg" alt="img" style="zoom:50%;" />
+
+- 当碰到第一个 1 的时候，已经知道累积了 X 个 0，结果集里的第一行就是 (0,X);
+- 当碰到第一个 2 的时候，已经知道累积了 Y 个 1，结果集里的第二行就是 (1,Y);
+
+按照这个逻辑执行的话，扫描到整个输入的数据结束，就可以拿到 group by 的结果，不需要临时表，也不需要再额外排序。
+
+InnoDB 的索引，就可以满足这个输入有序的条件。
+
+在 MySQL 5.7 版本支持了 generated column 机制，用来实现列数据的关联更新。你可以用下面的方法创建一个列 z，然后在 z 列上创建一个索引
+
+```mysql
+alter table t1 add column z int generated always as(id % 100), add index(z);
+```
+
+这样，索引 z 上的数据就是类似图 10 这样有序的了。上面的 group by 语句就可以改成：
+
+```mysql
+select z, count(*) as c from t1 group by z;
+```
+
+<img src="MySQL.assets/c9f88fa42d92cf7dde78fca26c4798b9.png" alt="img" style="zoom:50%;" />
+
+从 Extra 字段可以看到，这个语句的执行不再需要临时表，也不需要排序了。
+
+
+
+#### 直接排序
+
+如果可以通过加索引来完成 group by 逻辑就再好不过了。但是，如果碰上不适合创建索引的场景，我们还是要老老实实做排序的。
+
+假如一个 group by 语句中需要放到临时表上的数据量特别大，却还是要“先放到内存临时表，插入一部分数据后，发现内存临时表不够用了再转成磁盘临时表”，看上去就有点儿傻。
+
+可以在 group by 语句中加入 SQL_BIG_RESULT 这个提示（hint），就可以告诉优化器：这个语句涉及的数据量很大，请直接用磁盘临时表。
+
+优化器一看，磁盘临时表是 B+ 树存储，存储效率不如数组来得高。所以，既然你告诉我数据量很大，那从磁盘空间考虑，还是直接用数组来存吧。
+
+```mysql
+select SQL_BIG_RESULT id%100 as m, count(*) as c from t1 group by m;
+```
+
+执行流程就是这样的：
+
+1. 初始化 sort_buffer，确定放入一个整型字段，记为 m；
+2. 扫描表 t1 的索引 a，依次取出里面的 id 值, 将 id%100 的值存入 sort_buffer 中；
+3. 扫描完成后，对 sort_buffer 的字段 m 做排序（如果 sort_buffer 内存不够用，就会利用磁盘临时文件辅助排序）；
+4. 排序完成后，就得到了一个有序数组。
+
+根据有序数组，得到数组里面的不同值，以及每个值的出现次数。这一步的逻辑，你已经从前面的group-索引优化中了解过了。
+
+<img src="MySQL.assets/83b6cd6b3e37dfbf9699cf0ccc0f1bec.png" alt="img" style="zoom: 67%;" />
+
+<img src="MySQL.assets/8269dc6206a7ef20cb515c23df0b846a.jpg" alt="img" style="zoom: 67%;" />
+
+从 Extra 字段可以看到，这个语句的执行没有再使用临时表，而是直接用了排序算法。
+
+------
+
+
+
+## Memory引擎
+
+### 内存表的数据组织结构
+
+为了便于分析，我来把这个问题简化一下，假设有以下的两张表 t1 和 t2，其中表 t1 使用 Memory 引擎， 表 t2 使用 InnoDB 引擎。
+
+```mysql
+create table t1(id int primary key, c int) engine=Memory;
+create table t2(id int primary key, c int) engine=innodb;
+insert into t1 values(1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),(9,9),(0,0);
+insert into t2 values(1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8),(9,9),(0,0);
+```
+
+<img src="MySQL.assets/3fb1100b6e3390357d4efff0ba4765e6.png" alt="img" style="zoom: 67%;" />
+
+表 t2 用的是 InnoDB 引擎，它的主键索引 id 的组织方式，你已经很熟悉了：InnoDB 表的数据就放在主键索引树上，主键索引是 B+ 树。主键索引上的值是有序存储的。在执行 select * 的时候，就会按照叶子节点从左到右扫描，所以得到的结果里，0 就出现在第一行。
+
+与 InnoDB 引擎不同，Memory 引擎的数据和索引是分开的。我们来看一下表 t1 中的数据内容。
+
+<img src="MySQL.assets/dde03e92074cecba4154d30cd16a9684.jpg" alt="img" style="zoom:50%;" />
+
+可以看到，内存表的数据部分以数组的方式单独存放，而主键 id 索引里，存的是每个数据的位置。主键 id 是 hash 索引，可以看到索引上的 key 并不是有序的。
+
+从中我们可以看出，这两个引擎的一些典型不同：
+
+1. **InnoDB 表的数据总是有序存放的，而内存表的数据就是按照写入顺序存放的；**
+2. **当数据文件有空洞的时候，InnoDB 表在插入新数据的时候，为了保证数据有序性，只能在固定的位置写入新值，而内存表找到空位就可以插入新值；**
+3. **数据位置发生变化的时候，InnoDB 表只需要修改主键索引，而内存表需要修改所有索引；**
+4. **InnoDB 表用主键索引查询时需要走一次索引查找，用普通索引查询的时候，需要走两次索引查找。而内存表没有这个区别，所有索引的“地位”都是相同的。**
+5. **InnoDB 支持变长数据类型，不同记录的长度可能不同；内存表不支持 Blob 和 Text 字段，并且即使定义了 varchar(N)，实际也当作 char(N)，也就是固定长度字符串来存储，因此内存表的每行数据长度相同。**
+
+
+
+需要指出的是，表 t1 的这个主键索引是哈希索引，因此如果执行范围查询，比如
+
+> select * from t1 where id<5;
+
+是用不上主键索引的，需要走全表扫描。那如果要让内存表支持范围扫描，应该怎么办呢 ？
+
+
+
+### hash 索引和 B-Tree 索引
+
+实际上，内存表也是支 B-Tree 索引的。在 id 列上创建一个 B-Tree 索引，
+
+```mysql
+alter table t1 add index a_btree_index using btree (id);
+```
+
+这时，表 t1 的数据组织形式就变成了这样：
+
+<img src="MySQL.assets/1788deca56cb83c114d8353c92e3bde3.jpg" alt="img" style="zoom:50%;" />
+
+<img src="MySQL.assets/a85808fcccab24911d257d720550328a.png" alt="img" style="zoom:67%;" />
+
+可以看到，执行 select * from t1 where id<5 的时候，优化器会选择 B-Tree 索引，所以返回结果是 0 到 4。 使用 force index 强行使用主键 id 这个索引，id=0 这一行就在结果集的最末尾了。
+
+但是，接下来我要跟你说明，为什么我不建议你在生产环境上使用内存表。这里的原因主要包括两个方面：
+
+1. 锁粒度问题；
+2. 数据持久化问题。
+
+
+
+### 内存表的问题
+
+#### 内存表的锁
+
+内存表不支持行锁，只支持表锁。因此，一张表只要有更新，就会堵住其他所有在这个表上的读写操作。
+
+需要注意的是，这里的表锁跟之前我们介绍过的 MDL 锁不同，但都是表级的锁。
+
+
+
+#### 数据持久性问题
+
+数据放在内存中，是内存表的优势，但也是一个劣势。因为，数据库重启的时候，所有的内存表都会被清空。
+
+**我们先看看 M-S 架构下，使用内存表存在的问题。**
+
+<img src="MySQL.assets/5b910e4c0f1afa219aeecd1f291c95e9.jpg" alt="img" style="zoom:50%;" />
+
+
+
+如果备库重启，主库同步的语句都会报错。
+
+但是，接下来内存表的这个特性就会让使用现象显得更“诡异”了。由于 MySQL 知道重启之后，内存表的数据会丢失。所以，担心主库重启之后，出现主备不一致，MySQL 在实现上做了这样一件事儿：在数据库重启之后，往 binlog 里面写入一行 DELETE FROM t1。
+
+**如果使用是下图所示的双 M 结构的话：**
+
+<img src="MySQL.assets/4089c9c1f92ce61d2ed779fd0932ba57.jpg" alt="img" style="zoom:50%;" />
+
+在备库重启的时候，备库 binlog 里的 delete 语句就会传到主库，然后把主库内存表的内容删除。这样你在使用的时候就会发现，主库的内存表数据突然被清空了。
+
+所以，**建议你把普通内存表都用 InnoDB 表来代替**。但是，有一个场景却是例外的。这个场景就是，我们在第 35 和 36 篇说到的用户临时表。在数据量可控，不会耗费过多内存的情况下，你可以考虑使用内存表。
