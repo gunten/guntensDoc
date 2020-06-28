@@ -2493,3 +2493,122 @@ alter table t1 add index a_btree_index using btree (id);
 在备库重启的时候，备库 binlog 里的 delete 语句就会传到主库，然后把主库内存表的内容删除。这样你在使用的时候就会发现，主库的内存表数据突然被清空了。
 
 所以，**建议你把普通内存表都用 InnoDB 表来代替**。但是，有一个场景却是例外的。这个场景就是，我们在第 35 和 36 篇说到的用户临时表。在数据量可控，不会耗费过多内存的情况下，你可以考虑使用内存表。
+
+
+
+## 自增主键为何不连续？
+
+```mysql
+CREATE TABLE `t` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `c` int(11) DEFAULT NULL,
+  `d` int(11) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `c` (`c`)
+) ENGINE=InnoDB;
+```
+
+
+
+### 自增值保存在哪儿？
+
+不同的引擎对于自增值的保存策略不同。
+
+1. MyISAM 引擎的自增值保存在数据文件中。
+2. InnoDB 引擎的自增值，其实是保存在了内存里，并且到了 MySQL 8.0 版本后，才有了“自增值持久化”的能力，也就是才实现了“如果发生重启，表的自增值可以恢复为 MySQL 重启前的值”，具体情况是：
+
+- ​	在 MySQL 5.7 及之前的版本，自增值保存在内存里，并没有持久化。每次重启后，第一次打开表的时候，都会去找自增值的最大值 max(id)，然后将 max(id)+1 作为这个表当前的自增值。﻿举例来说，如果一个表当前数据行里最大的 id 是 10，AUTO_INCREMENT=11。这时候，我们删除 id=10 的行，AUTO_INCREMENT 还是 11。但如果马上重启实例，重启后这个表的 AUTO_INCREMENT 就会变成 10。﻿也就是说，MySQL 重启可能会修改一个表的 AUTO_INCREMENT 的值。
+- ​	在 MySQL 8.0 版本，将自增值的变更记录在了 redo log 中，重启的时候依靠 redo log 恢复重启之前的值。
+
+
+
+### 自增值修改机制
+
+假设，某次要插入的值是 X，当前的自增值是 Y。
+
+1. 如果 X<Y，那么这个表的自增值不变；
+2. 如果 X≥Y，就需要把当前自增值修改为新的自增值。
+
+新的自增值生成算法是：从 auto_increment_offset 开始，以 auto_increment_increment 为步长，持续叠加，直到找到第一个大于 X 的值，作为新的自增值。(auto_increment_offset 和 auto_increment_increment 是两个系统参数，分别用来表示自增的初始值和步长，默认值都是 1)
+
+
+
+### 主键id不连续的3种情况
+
+**唯一键冲突是导致自增主键 id 不连续的第一种原因。**
+
+<img src="MySQL.assets/77b87820b649692a555f19b562d5d926.png" alt="img" style="zoom:50%;" />
+
+
+
+**事务回滚也会产生类似的现象，这就是第二种原因。**
+
+```mysql
+insert into t values(null,1,1);
+begin;
+insert into t values(null,2,2);
+rollback;
+insert into t values(null,2,2);
+//插入的行是(3,2,2)
+```
+
+
+
+**自增值为什么不能回退?**  MySQL 这么设计是为了提升性能。
+
+
+
+**第三种原因**
+
+如果一个 select … insert 语句要插入 10 万行数据，按照这个逻辑的话就要申请 10 万次。显然，这种申请自增 id 的策略，在大批量插入数据的情况下，不但速度慢，还会影响并发插入的性能。
+
+因此，对于批量插入数据的语句，MySQL 有一个批量申请自增 id 的策略：
+
+1. 语句执行过程中，第一次申请自增 id，会分配 1 个；
+2. 1 个用完以后，这个语句第二次申请自增 id，会分配 2 个；
+3. 依此类推，同一个语句去申请自增 id，每次申请到的自增 id 个数都是上一次的两倍。
+
+```mysql
+insert into t values(null, 1,1);
+insert into t values(null, 2,2);
+insert into t values(null, 3,3);
+insert into t values(null, 4,4);
+create table t2 like t;
+insert into t2(c,d) select c,d from t;
+insert into t2 values(null, 5,5);
+```
+
+insert…select，实际上往表 t2 中插入了 4 行数据。但是，这四行数据是分三次申请的自增 id，第一次申请到了 id=1，第二次被分配了 id=2 和 id=3， 第三次被分配到 id=4 到 id=7。
+
+由于这条语句实际只用上了 4 个 id，所以 id=5 到 id=7 就被浪费掉了。之后，再执行 insert into t2 values(null, 5,5)，实际上插入的数据就是（8,5,5)。
+
+
+
+### 自增锁的优化史
+
+自增 id 锁并不是一个事务锁，而是每次申请完就马上释放，以便允许别的事务再申请。其实，在 MySQL 5.1 版本之前，并不是这样的。
+
+在 MySQL 5.0 版本的时候，自增锁的范围是语句级别。也就是说，如果一个语句申请了一个表自增锁，这个锁会等语句执行结束以后才释放。显然，这样设计会影响并发度。
+
+MySQL 5.1.22 版本引入了一个新策略，新增参数 innodb_autoinc_lock_mode，默认值是 1。
+
+1. 这个参数的值被设置为 0 时，表示采用之前 MySQL 5.0 版本的策略，即语句执行结束后才释放锁；
+2. 这个参数的值被设置为 1 时：
+3. - 普通 insert 语句，自增锁在申请之后就马上释放；
+   - 类似 insert … select 这样的批量插入数据的语句，自增锁还是要等语句结束后才被释放；
+4. 这个参数的值被设置为 2 时，所有的申请自增主键的动作都是申请后就释放锁。
+
+你一定有两个疑问：**为什么默认设置下，insert … select 要使用语句级的锁？为什么这个参数的默认值不是 2？**
+
+比如
+
+<img src="MySQL.assets/e0a69e151277de54a8262657e4ec89df.png" alt="img" style="zoom:67%;" />
+
+如果 session B 是申请了自增值以后马上就释放自增锁，如果我们现在的 binlog_format=statement，主从id可能就不一致
+
+而要解决这个问题，有两种思路：
+
+1. 一种思路是，让原库的批量插入数据语句，固定生成连续的 id 值。所以，自增锁直到语句执行结束才释放，就是为了达到这个目的。
+2. 另一种思路是，在 binlog 里面把插入数据的操作都如实记录进来，到备库执行的时候，不再依赖于自增主键去生成。这种情况，其实就是 innodb_autoinc_lock_mode 设置为 2，同时 binlog_format 设置为 row。
+
+我这里说的**批量插入数据，包含的语句类型是 insert … select、replace … select 和 load data 语句。**
