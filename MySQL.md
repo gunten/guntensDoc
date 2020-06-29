@@ -2612,3 +2612,111 @@ MySQL 5.1.22 版本引入了一个新策略，新增参数 innodb_autoinc_lock_m
 2. 另一种思路是，在 binlog 里面把插入数据的操作都如实记录进来，到备库执行的时候，不再依赖于自增主键去生成。这种情况，其实就是 innodb_autoinc_lock_mode 设置为 2，同时 binlog_format 设置为 row。
 
 我这里说的**批量插入数据，包含的语句类型是 insert … select、replace … select 和 load data 语句。**
+
+
+
+------
+
+## insert 语句的锁为什么这么多
+
+
+
+### insert … select 语句
+
+接上一节最后一个例子。现在，我们一起来看看为什么在可重复读隔离级别下，binlog_format=statement 时执行：
+
+> insert into t2(c,d) select c,d from t;
+
+这个语句时，需要对表 t 的所有行和间隙加锁呢？
+
+如果没有锁的话，就可能出现 session B 的 insert 语句先执行，但是后写入 binlog 的情况。binlog 里面就记录了这样的语句序列：
+
+```mysql
+insert into t values(null,5,5);
+insert into t2(c,d) select c,d from t;
+```
+
+这个语句到了备库执行，就会把 c=5 这一行也写到表 t2 中，出现主备不一致。
+
+
+
+### insert 循环写入
+
+当然了，执行 insert … select 的时候，对目标表也不是锁全表，而是只锁住需要访问的资源。比如：
+
+```mysql
+insert into t2(c,d)  (select c+1, d from t force index(c) order by c desc limit 1);
+```
+
+这个语句的加锁范围，就是表 t 索引 c 上的 (3,4]和 (4,supremum]这两个 next-key lock，以及主键索引上 id=4 这一行。
+
+它的执行流程也比较简单，从表 t 中按照索引 c 倒序，扫描第一行，拿到结果写入到表 t2 中。
+
+因此整条语句的扫描行数是 1。
+
+
+
+那么，如果我们是要把这样的一行数据插入到原表 t 中的话：
+
+```mysql
+insert into t(c,d)  (select c+1, d from t force index(c) order by c desc limit 1);
+```
+
+<img src="MySQL.assets/d7270781ee3f216325b73bd53999b82a.png" alt="img" style="zoom: 50%;" />
+
+整个执行过程应该是这样：
+
+1. 创建临时表，表里有两个字段 c 和 d。
+2. 按照索引 c 扫描表 t，依次取 c=4、3、2、1，然后回表，读到 c 和 d 的值写入临时表。这时，Rows_examined=4。
+3. 由于语义里面有 limit 1，所以只取了临时表的第一行，再插入到表 t 中。这时，Rows_examined 的值加 1，变成了 5。
+
+也就是说，这个语句会导致在表 t 上做全表扫描，并且会给索引 c 上的所有间隙都加上共享的 next-key lock。所以，这个语句执行期间，其他事务不能在这个表上插入数据。
+
+由于实现上这个语句没有在子查询中就直接使用 limit 1，从而导致了这个语句的执行需要遍历整个表 t。它的优化方法也比较简单，就是用前面介绍的方法，先 insert into 到临时表 temp_t，这样就只需要扫描一行；然后再从表 temp_t 里面取出这行数据插入表 t1。
+
+```mysql
+create temporary table temp_t(c int,d int) engine=memory;
+insert into temp_t  (select c+1, d from t force index(c) order by c desc limit 1);
+insert into t select * from temp_t;
+drop table temp_t;
+```
+
+
+
+### insert 唯一键冲突
+
+分享一个经典的死锁场景
+
+<img src="MySQL.assets/63658eb26e7a03b49f123fceed94cd2d.png" alt="img" style="zoom: 67%;" />
+
+在 session A 执行 rollback 语句回滚的时候，session C 几乎同时发现死锁并返回。这个死锁产生的逻辑是这样的：
+
+1. 在 T1 时刻，启动 session A，并执行 insert 语句，此时在索引 c 的 c=5 上加了记录锁。注意，这个索引是唯一索引，因此退化为记录锁
+2. 在 T2 时刻，session B 要执行相同的 insert 语句，发现了唯一键冲突，加上读锁；同样地，session C 也在索引 c 上，c=5 这一个记录上，加了读锁。
+3. T3 时刻，session A 回滚。这时候，session B 和 session C 都试图继续执行插入操作，都要加上写锁。两个 session 都要等待对方的行锁，所以就出现了死锁。这个流程的状态变化图如下所示。
+
+<img src="MySQL.assets/3e0bf1a1241931c14360e73fd10032b8.jpg" alt="img" style="zoom: 67%;" />
+
+
+
+### insert into … on duplicate key update
+
+insert into … on duplicate key update 这个语义的逻辑是，插入一行数据，如果碰到唯一键约束，就执行后面的更新语句。
+
+**注意，如果有多个列违反了唯一性约束，就会按照索引的顺序，修改跟第一个索引冲突的行。**
+
+现在表 t 里面已经有了 (1,1,1) 和 (2,2,2) 这两行，我们再来看看下面这个语句执行的效果：
+
+<img src="MySQL.assets/5f384d6671c87a60e1ec7e490447d702.png" alt="img" style="zoom:67%;" />
+
+需要注意的是，执行这条语句的 affected rows 返回的是 2，很容易造成误解。实际上，真正更新的只有一行，只是在代码实现上，insert 和 update 都认为自己成功了，update 计数加了 1， insert 计数也加了 1。
+
+
+
+### 小结
+
+insert … select 是很常见的在两个表之间拷贝数据的方法。你需要注意，在可重复读隔离级别下，这个语句会给 select 的表里扫描到的记录和间隙加读锁。
+
+而如果 insert 和 select 的对象是同一个表，则有可能会造成循环写入。这种情况下，我们需要引入用户临时表来做优化。insert 语句如果出现唯一键冲突，会在冲突的唯一值上加共享的 next-key lock(S 锁)。
+
+因此，碰到由于唯一键约束导致报错后，要尽快提交或回滚事务，避免加锁时间过长。
