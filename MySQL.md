@@ -2720,3 +2720,92 @@ insert … select 是很常见的在两个表之间拷贝数据的方法。你�
 而如果 insert 和 select 的对象是同一个表，则有可能会造成循环写入。这种情况下，我们需要引入用户临时表来做优化。insert 语句如果出现唯一键冲突，会在冲突的唯一值上加共享的 next-key lock(S 锁)。
 
 因此，碰到由于唯一键约束导致报错后，要尽快提交或回滚事务，避免加锁时间过长。
+
+------
+
+
+
+## grant之后要跟着flush privileges吗？
+
+### 全局权限
+
+全局权限，作用于整个 MySQL 实例，这些权限信息保存在 mysql 库的 user 表里。如果我要给用户 ua 赋一个最高权限的话，语句是这么写的：
+
+```mysql
+grant all privileges on *.* to 'ua'@'%' with grant option;
+```
+
+这个 grant 命令做了两个动作：
+
+1. 磁盘上，将 mysql.user 表里，用户’ua’@’%'这一行的所有表示权限的字段的值都修改为‘Y’；
+2. 内存里，从数组 acl_users 中找到这个用户对应的对象，将 access 值（权限位）修改为二进制的“全 1”。
+
+在这个 grant 命令执行完成后，如果有新的客户端使用用户名 ua 登录成功，MySQL 会为新连接维护一个线程对象，然后从 acl_users 数组里查到这个用户的权限，并将权限值拷贝到这个线程对象中。之后在这个连接中执行的语句，所有关于全局权限的判断，都直接使用线程对象内部保存的权限位。
+
+
+
+如果要回收上面的 grant 语句赋予的权限，你可以使用下面这条命令：
+
+```mysql
+revoke all privileges on *.* from 'ua'@'%';
+```
+
+
+
+### db 权限
+
+如果要让用户 ua 拥有库 db1 的所有权限，可以执行下面这条命令：
+
+```mysql
+grant all privileges on db1.* to 'ua'@'%' with grant option;
+```
+
+基于库的权限记录保存在 mysql.db 表中，在内存里则保存在数组 acl_dbs 中。这条 grant 命令做了如下两个动作：
+
+1. 磁盘上，往 mysql.db 表中插入了一行记录，所有权限位字段设置为“Y”；
+2. 内存里，增加一个对象到数组 acl_dbs 中，这个对象的权限位为“全 1”。
+
+每次需要判断一个用户对一个数据库读写权限的时候，都需要遍历一次 acl_dbs 数组，根据 user、host 和 db 找到匹配的对象，然后根据对象的权限位来判断。
+
+
+
+**注意点**
+
+<img src="MySQL.assets/aea26807c8895961b666a5d96b081ac7.png" alt="img" style="zoom: 50%;" />
+
+这里在代码实现上有一个特别的逻辑，如果当前会话已经处于某一个 db 里面，之前 use 这个库的时候拿到的库权限会保存在会话变量中。
+
+你可以看到在 T6 时刻，session C 和 session B 对表 t 的操作逻辑是一样的。但是 session B 报错，而 session C 可以执行成功。这是因为 session C 在 T2 时刻执行的 use db1，拿到了这个库的权限，在切换出 db1 库之前，session C 对这个库就一直有权限。
+
+
+
+### 表权限和列权限
+
+其中，表权限定义存放在表 mysql.tables_priv 中，列权限定义存放在表 mysql.columns_priv 中。这两类权限，组合起来存放在内存的 hash 结构 column_priv_hash 中。这两类权限的赋权命令如下：
+
+```mysql
+create table db1.t1(id int, a int);
+
+grant all privileges on db1.t1 to 'ua'@'%' with grant option;
+GRANT SELECT(id), INSERT (id,a) ON mydb.mytbl TO 'ua'@'%' with grant option;
+```
+
+跟 db 权限类似，这两个权限每次 grant 的时候都会修改数据表，也会同步修改内存中的 hash 结构。因此，对这两类权限的操作，也会马上影响到已经存在的连接。
+
+
+
+<img src="MySQL.assets/d1885ed1ly1g0ab2twmjaj21gs0js78u.jpg" alt="d1885ed1ly1g0ab2twmjaj21gs0js78u" style="zoom:67%;" />
+
+
+
+###  flush privileges
+
+看到这里，你一定会问，看来 grant 语句都是即时生效的，那这么看应该就不需要执行 flush privileges 语句了呀。答案也确实是这样的。
+
+**正常情况下，grant 命令之后，没有必要跟着执行 flush privileges 命令。**
+
+那么，flush privileges 是在什么时候使用呢？显然，当数据表中的权限数据跟内存中的权限数据不一致的时候，flush privileges 语句可以用来重建内存数据，达到一致状态。
+
+这种不一致往往是由不规范的操作导致的，比如直接用 DML 语句操作系统权限表。我们来看一下下面这个场景：
+
+<img src="MySQL.assets/9031814361be42b7bc084ad2ab2aa3ec.png" alt="img" style="zoom: 50%;" />
