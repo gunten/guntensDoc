@@ -145,3 +145,81 @@ Tomcat 要实现 2 个核心功能：
 
 
 
+Tomcat 支持的 I/O 模型有：
+
+- NIO：非阻塞 I/O，采用 Java NIO 类库实现。
+- NIO.2：异步 I/O，采用 JDK 7 最新的 NIO.2 类库实现。
+- APR：采用 Apache 可移植运行库实现，是 C/C++ 编写的本地库。
+
+Tomcat 支持的应用层协议有：
+
+- HTTP/1.1：这是大部分 Web 应用采用的访问协议。
+- AJP：用于和 Web 服务器集成（如 Apache）。
+- HTTP/2：HTTP 2.0 大幅度的提升了 Web 性能。
+
+
+
+Tomcat 为了实现支持多种 I/O 模型和应用层协议，一个容器可能对接多个连接器。但是单独的连接器或者容器都不能对外提供服务，需要把它们组装起来才能工作，组装后这个整体叫作 Service 组件。这里请你注意，Service 本身没有做什么重要的事情，只是在连接器和容器外面多包了一层，把它们组装在一起。
+
+<img src="Tomcat&amp;Jetty.assets/ee880033c5ae38125fa91fb3c4f8cad6.jpg" alt="img" style="zoom: 33%;" />
+
+
+
+### 连接器
+
+连接器对 Servlet 容器屏蔽了协议及 I/O 模型等的区别，无论是 HTTP 还是 AJP，在容器中获取到的都是一个标准的 ServletRequest 对象。
+
+连接器需要完成 3 个高内聚的功能，分别对应3个组件：
+
+- 网络通信。对应**Endpoint**
+- 应用层协议解析，生成统一的Tomcat Request/Response 对象。对应**Processor**
+- Tomcat Request/Response 与 ServletRequest/ServletResponse 的转化。对应**Adapter**
+
+Endpoint 负责提供字节流给 Processor，Processor 负责提供 Tomcat Request 对象给 Adapter，Adapter 负责提供 ServletRequest 对象给容器。
+
+
+
+#### ProtocolHandler 组件
+
+由于 I/O 模型和应用层协议可以自由组合，比如 NIO + HTTP 或者 NIO.2 + AJP。Tomcat 的设计者将网络通信和应用层协议解析放在一起考虑，设计了一个叫 ProtocolHandler 的接口来封装这两种变化点。
+
+<img src="Tomcat&amp;Jetty.assets/6eeaeb93839adcb4e76c15ee93f545ce.jpg" style="zoom: 33%;" />
+
+<img src="Tomcat&amp;Jetty.assets/13850ee56c3f09cbabe9892e84502155.jpg" style="zoom:33%;" />
+
+
+
+- Endpoint
+
+Endpoint 是对传输层的抽象，因此 Endpoint 是用来实现 TCP/IP 协议的。
+
+Endpoint 是一个接口，对应的抽象实现类是 AbstractEndpoint，而 AbstractEndpoint 的具体子类，比如在 NioEndpoint 和 Nio2Endpoint 中，有两个重要的子组件：Acceptor 和 SocketProcessor。
+
+其中 Acceptor 用于监听 Socket 连接请求。SocketProcessor 用于处理接收到的 Socket 请求，它实现 Runnable 接口，在 run 方法里调用协议处理组件 Processor 进行处理。为了提高处理能力，SocketProcessor 被提交到线程池来执行。而这个线程池叫作执行器（Executor)，我在后面的专栏会详细介绍 Tomcat 如何扩展原生的 Java 线程池。
+
+
+
+- Processor
+
+  如果说 Endpoint 是用来实现 TCP/IP 协议的，那么 Processor 用来实现 HTTP 协议。
+
+  Processor 是一个接口，定义了请求的处理等方法。它的抽象实现类 AbstractProcessor 对一些协议共有的属性进行封装，没有对方法进行实现。具体的实现有 AjpProcessor、Http11Processor 等，这些具体实现类实现了特定协议的解析方法和请求处理方式。
+
+
+
+再来看看连接器的组件图：
+
+<img src="Tomcat&amp;Jetty.assets/309cae2e132210489d327cf55b284dcf.jpg" alt="img" style="zoom:33%;" />
+
+
+
+从图中我们看到，Endpoint 接收到 Socket 连接后，生成一个 SocketProcessor 任务提交到线程池去处理，SocketProcessor 的 run 方法会调用 Processor 组件去解析应用层协议，Processor 通过解析生成 Request 对象后，会调用 Adapter 的 Service 方法。
+
+
+
+#### Adapter 组件
+
+ProtocolHandler 接口负责解析请求并生成 Tomcat Request 类。但是这个 Request 对象不是标准的 ServletRequest，也就意味着，不能用 Tomcat Request 作为参数来调用容器。Tomcat 设计者的解决方案是引入 CoyoteAdapter，这是适配器模式的经典运用，连接器调用 CoyoteAdapter 的 sevice 方法，传入的是 Tomcat Request 对象，CoyoteAdapter 负责将 Tomcat Request 转成 ServletRequest，再调用容器的 service 方法。
+
+
+
