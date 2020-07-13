@@ -10,15 +10,11 @@
 
 ### HTTP 请求响应实例
 
-<img src="Tomcat&amp;Jetty.assets/f58bf57649ec9eb35eb24e0679bb2514.png" alt="img" style="zoom:67%;" />
-
-你可以看到，HTTP 请求数据由三部分组成，分别是**请求行、请求报头、请求正文**。当这个 HTTP 请求数据到达 Tomcat 后，Tomcat 会把 HTTP 请求数据字节流解析成一个 Request 对象，这个 Request 对象封装了 HTTP 所有的请求信息。接着 Tomcat 把这个 Request 对象交给 Web 应用去处理，处理完后得到一个 Response 对象，Tomcat 会把这个 Response 对象转成 HTTP 格式的响应数据并发送给浏览器。
+![f58bf57649ec9eb35eb24e0679bb2514](Tomcat&Jetty.assets/f58bf57649ec9eb35eb24e0679bb2514.png)你可以看到，HTTP 请求数据由三部分组成，分别是**请求行、请求报头、请求正文**。当这个 HTTP 请求数据到达 Tomcat 后，Tomcat 会把 HTTP 请求数据字节流解析成一个 Request 对象，这个 Request 对象封装了 HTTP 所有的请求信息。接着 Tomcat 把这个 Request 对象交给 Web 应用去处理，处理完后得到一个 Response 对象，Tomcat 会把这个 Response 对象转成 HTTP 格式的响应数据并发送给浏览器。
 
 我们再来看看 HTTP 响应的格式，HTTP 的响应也是由三部分组成，分别是**状态行、响应报头、报文主体**。同样，我还以极客时间登陆请求的响应为例。
 
-<img src="Tomcat&amp;Jetty.assets/84f4fe4c411dfb9fd83a1d53cf2915b7.png" alt="img" style="zoom:67%;" />
-
-
+![84f4fe4c411dfb9fd83a1d53cf2915b7](Tomcat&Jetty.assets/84f4fe4c411dfb9fd83a1d53cf2915b7.png)
 
 ### Cookie 和 Session
 
@@ -62,9 +58,7 @@ cookie有两个重要属性：
 
 ## Servlet规范和Servlet容器
 
-<img src="Tomcat&amp;Jetty.assets/dfe304d3336f29d833b97f2cfe8d7801.jpg" alt="img" style="zoom: 50%;" />
-
-Servlet 接口其实是 Servlet 容器跟具体业务类之间的接口。Servlet 接口和 Servlet 容器的出现，达到了 HTTP 服务器与业务类解耦的目的。
+![dfe304d3336f29d833b97f2cfe8d7801](Tomcat&Jetty.assets/dfe304d3336f29d833b97f2cfe8d7801.jpg)Servlet 接口其实是 Servlet 容器跟具体业务类之间的接口。Servlet 接口和 Servlet 容器的出现，达到了 HTTP 服务器与业务类解耦的目的。
 
 而 Servlet 接口和 Servlet 容器这一整套规范叫作 Servlet 规范。Tomcat 和 Jetty 都按照 Servlet 规范的要求实现了 Servlet 容器，同时它们也具有 HTTP 服务器的功能。
 
@@ -97,9 +91,7 @@ public interface Servlet {
 
 ### Servlet 容器
 
-<img src="Tomcat&amp;Jetty.assets/b70723c89b4ed0bccaf073c84e08e115.jpg" alt="img" style="zoom:50%;" />
-
-
+![b70723c89b4ed0bccaf073c84e08e115](Tomcat&Jetty.assets/b70723c89b4ed0bccaf073c84e08e115.jpg)
 
 #### web应用
 
@@ -135,3 +127,21 @@ servlet、spring、springMVC启动时关系
 > Tomcat&Jetty在启动过程中还会扫描Servlet，一个Web应用中的Servlet可以有多个，以SpringMVC中的DispatcherServlet为例，这个Servlet实际上是一个标准的前端控制器，用以转发、匹配、处理每个Servlet请求。
 >
 > Servlet一般会延迟加载，当第一个请求达到时，Tomcat&Jetty发现DispatcherServlet还没有被实例化，就调用DispatcherServlet的init方法，DispatcherServlet在初始化的时候会建立自己的容器，叫做SpringMVC 容器，用来持有Spring MVC相关的Bean。同时，Spring MVC还会通过ServletContext拿到Spring根容器，并将Spring根容器设为SpringMVC容器的父容器，请注意，Spring MVC容器可以访问父容器中的Bean，但是父容器不能访问子容器的Bean， 也就是说Spring根容器不能访问SpringMVC容器里的Bean。说的通俗点就是，在Controller里可以访问Service对象，但是在Service里不可以访问Controller对象。
+
+
+
+## 连接器是如何设计的？
+
+
+
+### Tomcat 总体架构
+
+Tomcat 要实现 2 个核心功能：
+
+- 处理 Socket 连接，负责网络字节流与 Request 和 Response 对象的转化。
+- 加载和管理 Servlet，以及具体处理 Request 请求。
+
+**因此 Tomcat 设计了两个核心组件连接器（Connector）和容器（Container）来分别做这两件事情。连接器负责对外交流，容器负责内部处理。**
+
+
+
