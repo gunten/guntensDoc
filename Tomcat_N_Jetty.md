@@ -10,11 +10,11 @@
 
 ### HTTP 请求响应实例
 
-![f58bf57649ec9eb35eb24e0679bb2514](Tomcat&Jetty.assets/f58bf57649ec9eb35eb24e0679bb2514.png)你可以看到，HTTP 请求数据由三部分组成，分别是**请求行、请求报头、请求正文**。当这个 HTTP 请求数据到达 Tomcat 后，Tomcat 会把 HTTP 请求数据字节流解析成一个 Request 对象，这个 Request 对象封装了 HTTP 所有的请求信息。接着 Tomcat 把这个 Request 对象交给 Web 应用去处理，处理完后得到一个 Response 对象，Tomcat 会把这个 Response 对象转成 HTTP 格式的响应数据并发送给浏览器。
+![f58bf57649ec9eb35eb24e0679bb2514](Tomcat_N_Jetty.assets/f58bf57649ec9eb35eb24e0679bb2514.png)你可以看到，HTTP 请求数据由三部分组成，分别是**请求行、请求报头、请求正文**。当这个 HTTP 请求数据到达 Tomcat 后，Tomcat 会把 HTTP 请求数据字节流解析成一个 Request 对象，这个 Request 对象封装了 HTTP 所有的请求信息。接着 Tomcat 把这个 Request 对象交给 Web 应用去处理，处理完后得到一个 Response 对象，Tomcat 会把这个 Response 对象转成 HTTP 格式的响应数据并发送给浏览器。
 
 我们再来看看 HTTP 响应的格式，HTTP 的响应也是由三部分组成，分别是**状态行、响应报头、报文主体**。同样，我还以极客时间登陆请求的响应为例。
 
-![84f4fe4c411dfb9fd83a1d53cf2915b7](Tomcat&Jetty.assets/84f4fe4c411dfb9fd83a1d53cf2915b7.png)
+![84f4fe4c411dfb9fd83a1d53cf2915b7](Tomcat_N_Jetty.assets/84f4fe4c411dfb9fd83a1d53cf2915b7.png)
 
 ### Cookie 和 Session
 
@@ -58,7 +58,7 @@ cookie有两个重要属性：
 
 ## Servlet规范和Servlet容器
 
-![dfe304d3336f29d833b97f2cfe8d7801](Tomcat&Jetty.assets/dfe304d3336f29d833b97f2cfe8d7801.jpg)Servlet 接口其实是 Servlet 容器跟具体业务类之间的接口。Servlet 接口和 Servlet 容器的出现，达到了 HTTP 服务器与业务类解耦的目的。
+![dfe304d3336f29d833b97f2cfe8d7801](Tomcat_N_Jetty.assets/dfe304d3336f29d833b97f2cfe8d7801.jpg)Servlet 接口其实是 Servlet 容器跟具体业务类之间的接口。Servlet 接口和 Servlet 容器的出现，达到了 HTTP 服务器与业务类解耦的目的。
 
 而 Servlet 接口和 Servlet 容器这一整套规范叫作 Servlet 规范。Tomcat 和 Jetty 都按照 Servlet 规范的要求实现了 Servlet 容器，同时它们也具有 HTTP 服务器的功能。
 
@@ -91,7 +91,7 @@ public interface Servlet {
 
 ### Servlet 容器
 
-![b70723c89b4ed0bccaf073c84e08e115](Tomcat&Jetty.assets/b70723c89b4ed0bccaf073c84e08e115.jpg)
+![b70723c89b4ed0bccaf073c84e08e115](Tomcat_N_Jetty.assets/b70723c89b4ed0bccaf073c84e08e115.jpg)
 
 #### web应用
 
@@ -161,7 +161,7 @@ Tomcat 支持的应用层协议有：
 
 Tomcat 为了实现支持多种 I/O 模型和应用层协议，一个容器可能对接多个连接器。但是单独的连接器或者容器都不能对外提供服务，需要把它们组装起来才能工作，组装后这个整体叫作 Service 组件。这里请你注意，Service 本身没有做什么重要的事情，只是在连接器和容器外面多包了一层，把它们组装在一起。
 
-<img src="Tomcat&amp;Jetty.assets/ee880033c5ae38125fa91fb3c4f8cad6.jpg" alt="img" style="zoom: 33%;" />
+<img src="Tomcat_N_Jetty.assets/ee880033c5ae38125fa91fb3c4f8cad6.jpg" alt="img" style="zoom: 33%;" />
 
 
 
@@ -183,9 +183,9 @@ Endpoint 负责提供字节流给 Processor，Processor 负责提供 Tomcat Requ
 
 由于 I/O 模型和应用层协议可以自由组合，比如 NIO + HTTP 或者 NIO.2 + AJP。Tomcat 的设计者将网络通信和应用层协议解析放在一起考虑，设计了一个叫 ProtocolHandler 的接口来封装这两种变化点。
 
-<img src="Tomcat&amp;Jetty.assets/6eeaeb93839adcb4e76c15ee93f545ce.jpg" style="zoom: 33%;" />
+<img src="Tomcat_N_Jetty.assets/6eeaeb93839adcb4e76c15ee93f545ce.jpg" style="zoom: 33%;" />
 
-<img src="Tomcat&amp;Jetty.assets/13850ee56c3f09cbabe9892e84502155.jpg" style="zoom:33%;" />
+<img src="Tomcat_N_Jetty.assets/13850ee56c3f09cbabe9892e84502155.jpg" style="zoom:33%;" />
 
 
 
@@ -209,7 +209,7 @@ Endpoint 是一个接口，对应的抽象实现类是 AbstractEndpoint，而 Ab
 
 再来看看连接器的组件图：
 
-<img src="Tomcat&amp;Jetty.assets/309cae2e132210489d327cf55b284dcf.jpg" alt="img" style="zoom:33%;" />
+<img src="Tomcat_N_Jetty.assets/309cae2e132210489d327cf55b284dcf.jpg" alt="img" style="zoom:33%;" />
 
 
 
