@@ -223,3 +223,98 @@ ProtocolHandler 接口负责解析请求并生成 Tomcat Request 类。但是这
 
 
 
+## 容器的设计
+
+### 容器的层次结构
+
+Tomcat 设计了 4 种容器，分别是 Engine、Host、Context 和 Wrapper。这 4 种容器不是平行关系，而是父子关系。
+
+<img src="https://static001.geekbang.org/resource/image/cc/ed/cc968a11925591df558da0e7393f06ed.jpg" alt="img" style="zoom: 33%;" />
+
+Engine 表示引擎，用来管理多个虚拟站点，一个 Service 最多只能有一个 Engine；Host 代表的是一个虚拟主机，或者说一个站点，可以给 Tomcat 配置多个虚拟主机地址，而一个虚拟主机下可以部署多个 Web 应用程序；Context 表示一个 Web 应用程序；Wrapper 表示一个 Servlet，一个 Web 应用程序中可能会有多个 Servlet。
+
+可以再通过 Tomcat 的server.xml配置文件来加深对 Tomcat 容器的理解。
+
+<img src="https://static001.geekbang.org/resource/image/82/66/82b3f97aab5152dd5fe74e947db2a266.jpg" alt="img" style="zoom:50%;" />
+
+
+
+Tomcat 是怎么管理这些容器的呢？你会发现这些容器具有父子关系，形成一个树形结构，Tomcat 就是用组合模式来管理这些容器的。
+
+具体实现方法是，所有容器组件都实现了 Container 接口
+
+```java
+public interface Container extends Lifecycle {
+    public void setName(String name);
+    public Container getParent();
+    public void setParent(Container container);
+    public void addChild(Container child);
+    public void removeChild(Container child);
+    public Container findChild(String name);
+}
+```
+
+
+
+### 请求定位 Servlet 的过程
+
+我通过一个例子来解释这个定位的过程。
+
+假如有一个网购系统，有面向网站管理人员的后台管理系统，还有面向终端客户的在线购物系统。这两个系统跑在同一个 Tomcat 上，为了隔离它们的访问域名，配置了两个虚拟域名：manage.shopping.com和user.shopping.com，网站管理人员通过manage.shopping.com域名访问 Tomcat 去管理用户和商品，而用户管理和商品管理是两个单独的 Web 应用。终端客户通过user.shopping.com域名去搜索商品和下订单，搜索功能和订单管理也是两个独立的 Web 应用。
+
+针对这样的部署，Tomcat 会创建一个 Service 组件和一个 Engine 容器组件，在 Engine 容器下创建两个 Host 子容器，在每个 Host 容器下创建两个 Context 子容器。由于一个 Web 应用通常有多个 Servlet，Tomcat 还会在每个 Context 容器里创建多个 Wrapper 子容器。每个容器都有对应的访问路径，你可以通过下面这张图来帮助你理解。
+
+<img src="https://static001.geekbang.org/resource/image/be/96/be22494588ca4f79358347468cd62496.jpg" alt="img" style="zoom: 33%;" />
+
+
+
+**首先，根据协议和端口号选定 Service 和 Engine。**
+
+**然后，根据域名选定 Host。**
+
+**之后，根据 URL 路径找到 Context 组件。**
+
+**最后，根据 URL 路径找到 Wrapper（Servlet）。**
+
+
+
+###  容器组件间如何调用
+
+连接器中的 Adapter 会调用容器的 Service 方法来执行 Servlet，最先拿到请求的是 Engine 容器，Engine 容器对请求做一些处理后，会把请求传给自己子容器 Host 继续处理，依次类推，最后这个请求会传给 Wrapper 容器，Wrapper 会调用最终的 Servlet 来处理。那么这个调用过程具体是怎么实现的呢？**答案是使用 Pipeline-Valve 管道。**
+
+
+
+Pipeline-Valve 是责任链模式，Valve 表示一个处理点，
+
+```java
+public interface Valve {
+  public Valve getNext();
+  public void setNext(Valve valve);
+  public void invoke(Request request, Response response)
+}
+```
+
+有一个链表将 Valve 链起来了。请你继续看 Pipeline 接口：
+
+```java
+public interface Pipeline extends Contained {
+  public void addValve(Valve valve);
+  public Valve getBasic(); // BasicValve 处于 Valve 链表的末端
+  public void setBasic(Valve valve);
+  public Valve getFirst();
+}
+```
+
+<img src="https://static001.geekbang.org/resource/image/b0/ca/b014ecce1f64b771bd58da62c05162ca.jpg" alt="img" style="zoom: 33%;" />
+
+整个调用过程由连接器中的 Adapter 触发的，它会调用 Engine 的第一个 Valve：
+
+> // Calling the container
+> connector.getService().getContainer().getPipeline().getFirst().invoke(request, response);
+
+Wrapper 容器的最后一个 Valve 会创建一个 Filter 链，并调用 doFilter 方法，最终会调到 Servlet 的 service 方法。
+
+Valve 和 Filter 有什么区别吗？它们的区别是：
+
+- Valve 是 Tomcat 的私有机制，与 Tomcat 的基础架构 /API 是紧耦合的。Servlet API 是公有的标准，所有的 Web 容器包括 Jetty 都支持 Filter 机制。
+- 另一个重要的区别是 Valve 工作在 Web 容器级别，拦截所有应用的请求；而 Servlet Filter 工作在应用级别，只能拦截某个 Web 应用的所有请求。如果想做整个 Web 容器的拦截器，必须通过 Valve 来实现。
