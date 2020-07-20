@@ -1,3 +1,7 @@
+---
+typora-root-url: ./
+---
+
 # Tomcat & Jetty
 
 而 Tomcat 和 Jetty 就是一个 Servlet 容器。为了方便使用，它们也具有 HTTP 服务器的功能，因此 **Tomcat 或者 Jetty 就是一个“HTTP 服务器 + Servlet 容器”，我们也叫它们 Web 容器。**
@@ -91,7 +95,7 @@ public interface Servlet {
 
 ### Servlet 容器
 
-![b70723c89b4ed0bccaf073c84e08e115](Tomcat_N_Jetty.assets/b70723c89b4ed0bccaf073c84e08e115.jpg)
+<img src="Tomcat_N_Jetty.assets/b70723c89b4ed0bccaf073c84e08e115.jpg" alt="b70723c89b4ed0bccaf073c84e08e115" style="zoom:50%;" />
 
 #### web应用
 
@@ -229,13 +233,13 @@ ProtocolHandler 接口负责解析请求并生成 Tomcat Request 类。但是这
 
 Tomcat 设计了 4 种容器，分别是 Engine、Host、Context 和 Wrapper。这 4 种容器不是平行关系，而是父子关系。
 
-<img src="https://static001.geekbang.org/resource/image/cc/ed/cc968a11925591df558da0e7393f06ed.jpg" alt="img" style="zoom: 33%;" />
+<img src="/Tomcat_N_Jetty.assets/cc968a11925591df558da0e7393f06ed.jpg" alt="img" style="zoom:33%;" />
 
 Engine 表示引擎，用来管理多个虚拟站点，一个 Service 最多只能有一个 Engine；Host 代表的是一个虚拟主机，或者说一个站点，可以给 Tomcat 配置多个虚拟主机地址，而一个虚拟主机下可以部署多个 Web 应用程序；Context 表示一个 Web 应用程序；Wrapper 表示一个 Servlet，一个 Web 应用程序中可能会有多个 Servlet。
 
 可以再通过 Tomcat 的server.xml配置文件来加深对 Tomcat 容器的理解。
 
-<img src="https://static001.geekbang.org/resource/image/82/66/82b3f97aab5152dd5fe74e947db2a266.jpg" alt="img" style="zoom:50%;" />
+<img src="/Tomcat_N_Jetty.assets/82b3f97aab5152dd5fe74e947db2a266.jpg" alt="img" style="zoom:50%;" />
 
 
 
@@ -264,7 +268,7 @@ public interface Container extends Lifecycle {
 
 针对这样的部署，Tomcat 会创建一个 Service 组件和一个 Engine 容器组件，在 Engine 容器下创建两个 Host 子容器，在每个 Host 容器下创建两个 Context 子容器。由于一个 Web 应用通常有多个 Servlet，Tomcat 还会在每个 Context 容器里创建多个 Wrapper 子容器。每个容器都有对应的访问路径，你可以通过下面这张图来帮助你理解。
 
-<img src="https://static001.geekbang.org/resource/image/be/96/be22494588ca4f79358347468cd62496.jpg" alt="img" style="zoom: 33%;" />
+<img src="/Tomcat_N_Jetty.assets/be22494588ca4f79358347468cd62496.jpg" alt="img" style="zoom: 33%;" />
 
 
 
@@ -305,7 +309,7 @@ public interface Pipeline extends Contained {
 }
 ```
 
-<img src="https://static001.geekbang.org/resource/image/b0/ca/b014ecce1f64b771bd58da62c05162ca.jpg" alt="img" style="zoom: 33%;" />
+<img src="/Tomcat_N_Jetty.assets/b014ecce1f64b771bd58da62c05162ca.jpg" alt="img" style="zoom:33%;" />
 
 整个调用过程由连接器中的 Adapter 触发的，它会调用 Engine 的第一个 Valve：
 
@@ -318,3 +322,124 @@ Valve 和 Filter 有什么区别吗？它们的区别是：
 
 - Valve 是 Tomcat 的私有机制，与 Tomcat 的基础架构 /API 是紧耦合的。Servlet API 是公有的标准，所有的 Web 容器包括 Jetty 都支持 Filter 机制。
 - 另一个重要的区别是 Valve 工作在 Web 容器级别，拦截所有应用的请求；而 Servlet Filter 工作在应用级别，只能拦截某个 Web 应用的所有请求。如果想做整个 Web 容器的拦截器，必须通过 Valve 来实现。
+
+
+
+Tomcat 内的 Context 组件跟 Servlet 规范中的 ServletContext 接口有什么区别？跟 Spring 中的 ApplicationContext 又有什么关系？
+
+> 1）Servlet规范中ServletContext表示web应用的上下文环境，而web应用对应tomcat的概念是Context，所以从设计上，ServletContext自然会成为tomcat的Context具体实现的一个成员变量。
+>
+> 2）tomcat内部实现也是这样完成的，ServletContext对应tomcat实现是org.apache.catalina.core.ApplicationContext，Context容器对应tomcat实现是org.apache.catalina.core.StandardContext。ApplicationContext是StandardContext的一个成员变量。
+>
+> 3）Spring的ApplicationContext之前已经介绍过，tomcat启动过程中ContextLoaderListener会监听到容器初始化事件，它的contextInitialized方法中，Spring会初始化全局的Spring根容器ApplicationContext，初始化完毕后，Spring将其存储到ServletContext中。
+>
+> 总而言之，Servlet规范中ServletContext是tomcat的Context实现的一个成员变量，而Spring的ApplicationContext是Servlet规范中ServletContext的一个属性。
+
+
+
+
+
+## Tomcat如何实现一键式启停？
+
+虚线表示一个请求在 Tomcat 中流转的过程。
+
+<img src="https://static001.geekbang.org/resource/image/12/9b/12ad9ddc3ff73e0aacf2276bcfafae9b.png" alt="img" style="zoom:67%;" />
+
+
+
+### 一键式启停：Lifecycle 接口
+
+设计就是要找到系统的变化点和不变点。这里的不变点就是每个组件都要经历创建、初始化、启动这几个过程，这些状态以及状态的转化是不变的。而变化点是每个具体组件的初始化方法，也就是启动方法是不一样的。
+
+我们把不变点抽象出来成为一个接口，这个接口跟生命周期有关，叫作 Lifecycle。
+
+在父组件的 init 方法里需要创建子组件并调用子组件的 init 方法。同样，在父组件的 start 方法里也需要调用子组件的 start 方法，因此调用者可以无差别的调用各组件的 init 方法和 start 方法，这就是**组合模式**的使用，并且只要调用最顶层组件，也就是 Server 组件的 init 和 start 方法，整个 Tomcat 就被启动起来了。
+
+<img src="https://static001.geekbang.org/resource/image/a1/5c/a1fcba6105f4235486bdba350d58bb5c.png" alt="img" style="zoom:50%;" />
+
+
+
+### 可扩展性：Lifecycle 事件
+
+我们再来考虑另一个问题，那就是系统的可扩展性。我们注意到，组件的 init 和 start 调用是由它的父组件的状态变化触发的，上层组件的初始化会触发子组件的初始化，上层组件的启动会触发子组件的启动，因此我们把组件的生命周期定义成一个个状态，把状态的转变看作是一个事件。而事件是有监听器的，在监听器里可以实现一些逻辑，并且监听器也可以方便的添加和删除，这就是典型的**观察者模式**。
+
+具体来说就是在 Lifecycle 接口里加入两个方法：添加监听器和删除监听器。除此之外，我们还需要定义一个 Enum 来表示组件有哪些状态，以及处在什么状态会触发什么样的事件。因此 Lifecycle 接口和 LifecycleState 就定义成了下面这样。
+
+<img src="/dd0ce38fdff06dcc6d40714f39fc4ec0.png" alt="img" style="zoom: 50%;" />
+
+
+
+### 重用性：LifecycleBase 抽象基类
+
+Tomcat 定义一个基类 LifecycleBase 来实现 Lifecycle 接口，把一些公共的逻辑放到基类中去，比如生命状态的转变与维护、生命事件的触发以及监听器的添加和删除等，而子类就负责实现自己的初始化、启动和停止等方法。为了避免跟基类中的方法同名，我们把具体子类的实现方法改个名字，在后面加上 Internal，叫 initInternal、startInternal 等。
+
+![img](/Tomcat_N_Jetty.assets/dd0ce38fdff06dcc6d40714f39fc4ec0.png)
+
+
+
+```java
+//模板模式
+@Override
+public final synchronized void init() throws LifecycleException {
+    //1. 状态检查
+    if (!state.equals(LifecycleState.NEW)) {
+        invalidTransition(Lifecycle.BEFORE_INIT_EVENT);
+    }
+
+    try {
+        //2.触发INITIALIZING事件的监听器
+        setStateInternal(LifecycleState.INITIALIZING, null, false);
+        
+        //3.调用具体子类的初始化方法
+        initInternal();
+        
+        //4. 触发INITIALIZED事件的监听器
+        setStateInternal(LifecycleState.INITIALIZED, null, false);
+    } catch (Throwable t) {
+      ...
+    }
+}
+```
+
+
+
+
+
+![img](/de55ad3475e714acbf883713ee077690.png)
+
+
+
+ContainerBase 实现了 Container 接口，也继承了 LifecycleBase 类，它们的生命周期管理接口和功能接口是分开的，这也符合设计中**接口分离的原则。**
+
+
+
+<img src="/578edfe9c06856324084ee193243694d.png" alt="img" style="zoom: 80%;" />
+
+\- Tomcat 本质是 Java 程序, [startup.sh](http://startup.sh) 启动 JVM 运行 Tomcat 启动类 bootstrap
+\- Bootstrap 初始化类加载器, 创建 Catalina
+\- Catalina 解析 server.xml, 创建相应组件, 调用 Server start 方法
+\- Server 组件管理 Service 组件并调用其 start 方法
+\- Service 负责管理连接器和顶层容器 Engine, 它会调用连接器和 Engine 的 start 方法。
+\- 这些类不处理具体请求, 主要管理下层组件, 并分配请求
+
+- Catalina 完成两个功能
+    \- 解析 server.xml, 创建定义的各组件, 调用 server init 和 start 方法
+    \- 处理异常情况, 例如 ctrl + c 关闭 Tomcat. 其会在 JVM 中注册"关闭钩子"
+      \- 关闭钩子, 在关闭 JVM 时做清理工作, 例如刷新缓存到磁盘
+      \- 关闭钩子是一个线程, JVM 停止前会执行器 run 方法, 该 run 方法调用 server stop 方法
+
+- Server 组件, 实现类 StandServer
+    \- 继承了 LifeCycleBase
+    \- 子组件是 Service, 需要管理其生命周期(调用其 LifeCycle 的方法), 用数组保存多个 Service 组件, 动态扩容数组来添加组件
+    \- 启动一个 socket Listen停止端口, Catalina 启动时, 调用 Server await 方法, 其创建 socket Listen 8005 端口, 并在死循环中等连接, 检查到 shutdown 命令, 调用 stop 方法
+
+-  Service 组件, 实现类 StandService
+    \- 包含 Server, Connector, Engine 和 Mapper 组件的成员变量
+    \- 还包含 MapperListener 成员变量, 以支持热部署, 其Listen容器变化, 并更新 Mapper, 是观察者模式
+    \- 需注意各组件启动顺序, 根据其依赖关系确定
+      \- 先启动 Engine, 再启动 Mapper Listener, 最后启动连接器, 而停止顺序相反.
+
+-  Engine 组件, 实现类 StandEngine 继承 ContainerBase
+    \- ContainerBase 实现了维护子组件的逻辑, 用 HaspMap 保存子组件, 因此各层容器可重用逻辑
+    \- ContainerBase 用专门线程池启动子容器, 并负责子组件启动/停止, "增删改查"
+    \- 请求到达 Engine 之前, Mapper 通过 URL 定位了容器, 并存入 Request 中. Engine 从 Request 取出 Host 子容器, 并调用其 pipeline 的第一个 valve

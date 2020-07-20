@@ -164,7 +164,7 @@ update语句执行流程图
 
 
 
-##MVCC-Multiversion Currency Control
+##MVCC-Multiversion Concurrency Control
 
 
 
