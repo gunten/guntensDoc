@@ -1,7 +1,3 @@
----
-typora-root-url: ./
----
-
 # Tomcat & Jetty
 
 而 Tomcat 和 Jetty 就是一个 Servlet 容器。为了方便使用，它们也具有 HTTP 服务器的功能，因此 **Tomcat 或者 Jetty 就是一个“HTTP 服务器 + Servlet 容器”，我们也叫它们 Web 容器。**
@@ -365,15 +361,13 @@ Tomcat 内的 Context 组件跟 Servlet 规范中的 ServletContext 接口有什
 
 具体来说就是在 Lifecycle 接口里加入两个方法：添加监听器和删除监听器。除此之外，我们还需要定义一个 Enum 来表示组件有哪些状态，以及处在什么状态会触发什么样的事件。因此 Lifecycle 接口和 LifecycleState 就定义成了下面这样。
 
-<img src="/dd0ce38fdff06dcc6d40714f39fc4ec0.png" alt="img" style="zoom: 50%;" />
-
-
+<img src="Tomcat_N_Jetty.assets/dd0ce38fdff06dcc6d40714f39fc4ec0.png" alt="img" style="zoom:50%;" />
 
 ### 重用性：LifecycleBase 抽象基类
 
 Tomcat 定义一个基类 LifecycleBase 来实现 Lifecycle 接口，把一些公共的逻辑放到基类中去，比如生命状态的转变与维护、生命事件的触发以及监听器的添加和删除等，而子类就负责实现自己的初始化、启动和停止等方法。为了避免跟基类中的方法同名，我们把具体子类的实现方法改个名字，在后面加上 Internal，叫 initInternal、startInternal 等。
 
-![img](/Tomcat_N_Jetty.assets/dd0ce38fdff06dcc6d40714f39fc4ec0.png)
+<img src="/Tomcat_N_Jetty.assets/dd0ce38fdff06dcc6d40714f39fc4ec0.png" alt="img" style="zoom: 50%;" />
 
 
 
@@ -405,17 +399,15 @@ public final synchronized void init() throws LifecycleException {
 
 
 
-![img](/de55ad3475e714acbf883713ee077690.png)
-
-
+<img src="Tomcat_N_Jetty.assets/de55ad3475e714acbf883713ee077690.png" alt="img"  />
 
 ContainerBase 实现了 Container 接口，也继承了 LifecycleBase 类，它们的生命周期管理接口和功能接口是分开的，这也符合设计中**接口分离的原则。**
 
 
 
-<img src="/578edfe9c06856324084ee193243694d.png" alt="img" style="zoom: 80%;" />
+<img src="Tomcat_N_Jetty.assets/578edfe9c06856324084ee193243694d.png" alt="img" style="zoom:67%;" />
 
-\- Tomcat 本质是 Java 程序, [startup.sh](http://startup.sh) 启动 JVM 运行 Tomcat 启动类 bootstrap
+- Tomcat 本质是 Java 程序, [startup.sh](http://startup.sh) 启动 JVM 运行 Tomcat 启动类 bootstrap
 \- Bootstrap 初始化类加载器, 创建 Catalina
 \- Catalina 解析 server.xml, 创建相应组件, 调用 Server start 方法
 \- Server 组件管理 Service 组件并调用其 start 方法
