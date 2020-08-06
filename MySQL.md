@@ -414,7 +414,7 @@ MySQL提供加全局读锁的方法：**Flush tables with read lock(FTWRL)**
 
 表锁用来互斥DML
 
-MDL用来互斥DML与DDL？
+MDL用来互斥DML与DDL
 
 #### 	表锁
 

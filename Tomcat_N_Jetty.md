@@ -405,6 +405,10 @@ ContainerBase 实现了 Container 接口，也继承了 LifecycleBase 类，它�
 
 
 
+##Tomcat的“高层们”都负责做什么？
+
+
+
 <img src="Tomcat_N_Jetty.assets/578edfe9c06856324084ee193243694d.png" alt="img" style="zoom:67%;" />
 
 - Tomcat 本质是 Java 程序, [startup.sh](http://startup.sh) 启动 JVM 运行 Tomcat 启动类 bootstrap
@@ -435,3 +439,207 @@ ContainerBase 实现了 Container 接口，也继承了 LifecycleBase 类，它�
     \- ContainerBase 实现了维护子组件的逻辑, 用 HaspMap 保存子组件, 因此各层容器可重用逻辑
     \- ContainerBase 用专门线程池启动子容器, 并负责子组件启动/停止, "增删改查"
     \- 请求到达 Engine 之前, Mapper 通过 URL 定位了容器, 并存入 Request 中. Engine 从 Request 取出 Host 子容器, 并调用其 pipeline 的第一个 valve
+
+
+
+## Jetty架构之Connector组件
+
+Jetty 源码：  https://github.com/jetty-project/embedded-jetty-jsp
+
+
+
+Jetty Server 就是由多个 Connector（连接器）、多个 Handler（处理器），以及一个线程池组成。整体结构请看下面这张图。
+
+<img src="Tomcat_N_Jetty.assets/95b908af86695af107fd3877a02190b6.jpg" alt="img" style="zoom: 50%;" />
+
+跟 Tomcat 一样，Jetty 也有 HTTP 服务器和 Servlet 容器的功能，因此 Jetty 中的 Connector 组件和 Handler 组件分别来实现这两个功能，而这两个组件工作时所需要的线程资源都直接从一个全局线程池 ThreadPool 中获取。
+
+
+
+### Connector 组件
+
+跟 Tomcat 一样，Connector 的主要功能是对 I/O 模型和应用层协议的封装。I/O 模型方面，最新的 Jetty 9 版本只支持 NIO。
+
+简单回顾完服务端 NIO 编程之后，你会发现服务端在 I/O 通信上主要完成了三件事情：**监听连接、I/O 事件查询以及数据读写**。因此 Jetty 设计了 **Acceptor、SelectorManager 和 Connection 来分别做这三件事情**
+
+
+
+#### Acceptor
+
+在 Connector 的实现类 ServerConnector 中，有一个_acceptors的数组，在 Connector 启动的时候, 会根据_acceptors数组的长度创建对应数量的 Acceptor，而 Acceptor 的个数可以配置。
+
+```java
+for (int i = 0; i < _acceptors.length; i++)
+{
+  Acceptor a = new Acceptor(i);
+  getExecutor().execute(a);
+}
+```
+
+Acceptor 是 ServerConnector 中的一个内部类，同时也是一个 Runnable，Acceptor 线程是通过 getExecutor 得到的线程池来执行的，前面提到这是一个全局的线程池。
+
+Acceptor 通过阻塞的方式来接受连接，这一点跟 Tomcat 也是一样的。
+
+```java
+public void accept(int acceptorID) throws IOException
+{
+  ServerSocketChannel serverChannel = _acceptChannel;
+  if (serverChannel != null && serverChannel.isOpen())
+  {
+    // 这里是阻塞的
+    SocketChannel channel = serverChannel.accept();
+    // 执行到这里时说明有请求进来了
+    accepted(channel);
+  }
+}
+
+//接受连接成功后会调用 accepted 函数，accepted 函数中会将 SocketChannel 设置为非阻塞模式，然后交给 Selector 去处理，因此这也就到了 Selector 的地界了。
+private void accepted(SocketChannel channel) throws IOException
+{
+    channel.configureBlocking(false);
+    Socket socket = channel.socket();
+    configure(socket);
+    // _manager是SelectorManager实例，里面管理了所有的Selector实例
+    _manager.accept(channel);
+}
+```
+
+
+
+#### SelectorManager
+
+Jetty 的 Selector 由 SelectorManager 类管理，而被管理的 Selector 叫作 ManagedSelector。SelectorManager 内部有一个 ManagedSelector 数组，真正干活的是 ManagedSelector。咱们接着上面分析，看看在 SelectorManager 在 accept 方法里做了什么。
+
+```java
+public void accept(SelectableChannel channel, Object attachment)
+{
+  //选择一个ManagedSelector来处理Channel
+  final ManagedSelector selector = chooseSelector();
+  //提交一个任务Accept给ManagedSelector
+  selector.submit(selector.new Accept(channel, attachment));
+}
+
+/*ManagedSelector 在处理这个任务主要做了两步：
+第一步，调用 Selector 的 register 方法把 Channel 注册到 Selector 上，拿到一个 SelectionKey。*/
+_key = _channel.register(selector, SelectionKey.OP_ACCEPT, this);
+
+//第二步，创建一个 EndPoint 和 Connection，并跟这个 SelectionKey（Channel）绑在一起：
+
+private void createEndPoint(SelectableChannel channel, SelectionKey selectionKey) throws IOException
+{
+    //1. 创建EndPoint
+    EndPoint endPoint = _selectorManager.newEndPoint(channel, this, selectionKey);
+    
+    //2. 创建Connection
+    Connection connection = _selectorManager.newConnection(channel, endPoint, selectionKey.attachment());
+    
+    //3. 把EndPoint、Connection和SelectionKey绑在一起
+    endPoint.setConnection(connection);
+    selectionKey.attach(endPoint);
+    
+}
+```
+
+这里需要你特别注意的是，ManagedSelector 并没有调用直接 EndPoint 的方法去处理数据，而是通过调用 EndPoint 的方法返回一个 Runnable，然后把这个 Runnable 扔给线程池执行，所以你能猜到，这个 Runnable 才会去真正读数据和处理请求。
+
+
+
+#### Connection
+
+这个 Runnable 是 EndPoint 的一个内部类，它会调用 Connection 的回调方法来处理请求。Jetty 的 Connection 组件类比就是 Tomcat 的 Processor，负责具体协议的解析，得到 Request 对象，并调用 Handler 容器进行处理。下面我简单介绍一下它的具体实现类 HttpConnection 对请求和响应的处理过程。
+
+**请求处理**：HttpConnection 并不会主动向 EndPoint 读取数据，而是向在 EndPoint 中注册一堆回调方法：
+
+```java
+getEndPoint().fillInterested(_readCallback);
+```
+
+这段代码就是告诉 EndPoint，数据到了你就调我这些回调方法_readCallback吧，有点异步 I/O 的感觉，也就是说 Jetty 在应用层面模拟了异步 I/O 模型。
+
+而在回调方法_readCallback里，会调用 EndPoint 的接口去读数据，读完后让 HTTP 解析器去解析字节流，HTTP 解析器会将解析后的数据，包括请求行、请求头相关信息存到 Request 对象里。
+
+**响应处理**：Connection 调用 Handler 进行业务处理，Handler 会通过 Response 对象来操作响应流，向流里面写入数据，HttpConnection 再通过 EndPoint 把数据写到 Channel，这样一次响应就完成了。
+
+
+
+<img src="Tomcat_N_Jetty.assets/b526a90be6ee4c3e45c94e122c9c1e83.jpg" alt="img" style="zoom: 50%;" />
+
+
+
+## Jetty架构之Handler组件
+
+### Handler 是什么
+
+Handler 就是一个接口，它有一堆实现类，Jetty 的 Connector 组件调用这些接口来处理 Servlet 请求
+
+```java
+public interface Handler extends LifeCycle, Destroyable
+{
+    //处理请求的方法
+    public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
+        throws IOException, ServletException;
+    
+    //每个Handler都关联一个Server组件，被Server管理
+    public void setServer(Server server);
+    public Server getServer();
+
+    //销毁方法相关的资源
+    public void destroy();
+}
+```
+
+
+
+### Handler 继承关系
+
+<img src="Tomcat_N_Jetty.assets/3a7b3fbf16bb79594ec23620507c5c64.png" alt="img" style="zoom: 80%;" />
+
+Handler 接口之下有抽象类 AbstractHandler，这一点并不意外，因为有接口一般就有抽象实现类。
+
+在 AbstractHandler 之下有 AbstractHandlerContainer，为什么需要这个类呢？这其实是个过渡，为了实现链式调用，一个 Handler 内部必然要有其他 Handler 的引用，所以这个类的名字里才有 Container，意思就是这样的 Handler 里包含了其他 Handler 的引用。
+
+理解了上面的 AbstractHandlerContainer，我们就能理解它的两个子类了：HandlerWrapper 和 HandlerCollection。简单来说就是，HandlerWrapper 和 HandlerCollection 都是 Handler，但是这些 Handler 里还包括其他 Handler 的引用。不同的是，HandlerWrapper 只包含一个其他 Handler 的引用，而 HandlerCollection 中有一个 Handler 数组的引用。
+
+接着来看左边的 HandlerWrapper，它有两个子类：Server 和 ScopedHandler。Server 比较好理解，它本身是 Handler 模块的入口，必然要将请求传递给其他 Handler 来处理，为了触发其他 Handler 的调用，所以它是一个 HandlerWrapper。
+
+再看 ScopedHandler，它也是一个比较重要的 Handler，实现了“具有上下文信息”的责任链调用。为什么我要强调“具有上下文信息”呢？那是因为 Servlet 规范规定 Servlet 在执行过程中是有上下文的。那么这些 Handler 在执行过程中如何访问这个上下文呢？这个上下文又存在什么地方呢？答案就是通过 ScopedHandler 来实现的。
+
+而 ScopedHandler 有一堆的子类，这些子类就是用来实现 Servlet 规范的，比如 ServletHandler、ContextHandler、SessionHandler、ServletContextHandler 和 WebAppContext。接下来我会详细介绍它们，但我们先把总体类图看完。
+
+请看类图的右边，跟 HandlerWrapper 对等的还有 HandlerCollection，HandlerCollection 其实维护了一个 Handler 数组。你可能会问，为什么要发明一个这样的 Handler？这是因为 Jetty 可能需要同时支持多个 Web 应用，如果每个 Web 应用有一个 Handler 入口，那么多个 Web 应用的 Handler 就成了一个数组，比如 Server 中就有一个 HandlerCollection，Server 会根据用户请求的 URL 从数组中选取相应的 Handler 来处理，就是选择特定的 Web 应用来处理请求。
+
+
+
+### 如何实现 Servlet 规范
+
+先来看看如何使用 Jetty 来启动一个 Web 应用。
+
+```java
+//新建一个WebAppContext，WebAppContext是一个Handler
+WebAppContext webapp = new WebAppContext();
+webapp.setContextPath("/mywebapp");
+webapp.setWar("mywebapp.war");
+
+//将Handler添加到Server中去
+server.setHandler(webapp);
+
+//启动Server
+server.start();
+server.join();
+```
+
+第一步创建一个 WebAppContext，接着设置一些参数到这个 Handler 中，就是告诉 WebAppContext 你的 WAR 包放在哪，Web 应用的访问路径是什么。
+
+第二步就是把新创建的 WebAppContext 添加到 Server 中，然后启动 Server。
+
+WebAppContext 对应一个 Web 应用。我们回忆一下 Servlet 规范中有 Context、Servlet、Filter、Listener 和 Session 等，Jetty 要支持 Servlet 规范，就需要有相应的 Handler 来分别实现这些功能。因此，Jetty 设计了 3 个组件：ContextHandler、ServletHandler 和 SessionHandler 来实现 Servlet 规范中规定的功能，而 WebAppContext 本身就是一个 ContextHandler，另外它还负责管理 ServletHandler 和 SessionHandler。
+
+我们再来看一下什么是 ContextHandler。ContextHandler 会创建并初始化 Servlet 规范里的 ServletContext 对象，同时 ContextHandler 还包含了一组能够让你的 Web 应用运行起来的 Handler，可以这样理解，Context 本身也是一种 Handler，它里面包含了其他的 Handler，这些 Handler 能处理某个特定 URL 下的请求。比如，ContextHandler 包含了一个或者多个 ServletHandler。
+
+再来看 ServletHandler，它实现了 Servlet 规范中的 Servlet、Filter 和 Listener 的功能。ServletHandler 依赖 FilterHolder、ServletHolder、ServletMapping、FilterMapping 这四大组件。FilterHolder 和 ServletHolder 分别是 Filter 和 Servlet 的包装类，每一个 Servlet 与路径的映射会被封装成 ServletMapping，而 Filter 与拦截 URL 的映射会被封装成 FilterMapping。
+
+SessionHandler 从名字就知道它的功能，用来管理 Session。除此之外 WebAppContext 还有一些通用功能的 Handler，比如 SecurityHandler 和 GzipHandler，同样从名字可以知道这些 Handler 的功能分别是安全控制和压缩 / 解压缩。
+
+WebAppContext 会将这些 Handler 构建成一个执行链，通过这个链会最终调用到我们的业务 Servlet。我们通过一张图来理解一下。
+
+<img src="Tomcat_N_Jetty.assets/5f1404567deec36ac68c36e44bb06cc1.jpg" alt="img" style="zoom:33%;" />
